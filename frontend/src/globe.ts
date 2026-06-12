@@ -6,6 +6,11 @@ const KERNEL_SIGMA = 0.22 // radians; how far one item's "mass" spreads
 const SEA_TAU = 0.35 // density where land breaks the surface
 const HMAX = 0.045 // tallest peaks above sea level
 const SEABED = -0.015
+// the terrain is a density visualisation, not an index: past this many items
+// the field is computed from a deterministic sample (shape is preserved)
+const DENSITY_SAMPLE = 2500
+const CUTOFF = 0.7 // radians; the gaussian kernel is nil beyond ~3 sigma
+const COS_CUTOFF = Math.cos(CUTOFF)
 
 // deterministic per-position jitter so duplicated (non-indexed) vertices at the
 // same position displace identically and the mesh stays watertight
@@ -14,29 +19,55 @@ function hash3(x: number, y: number, z: number): number {
   return s - Math.floor(s)
 }
 
-export function densityAt(p: THREE.Vector3, items: WorldItem[]): number {
-  let d = 0
-  for (const item of items) {
-    const dot = THREE.MathUtils.clamp(
-      p.x * item.pos[0] + p.y * item.pos[1] + p.z * item.pos[2],
-      -1,
-      1,
-    )
-    const ang = Math.acos(dot)
-    d += Math.exp(-(ang * ang) / (KERNEL_SIGMA * KERNEL_SIGMA))
-  }
-  return d
+// -- spatial bins: lat/lon grid so density queries only touch nearby items ----
+
+const LON_BINS = 36
+const LAT_BINS = 18
+const BIN_COUNT = LON_BINS * LAT_BINS
+
+function binIndex(x: number, y: number, z: number): number {
+  const lat = Math.asin(THREE.MathUtils.clamp(y, -1, 1))
+  const lon = Math.atan2(z, x)
+  const row = Math.min(
+    LAT_BINS - 1,
+    Math.floor(((lat + Math.PI / 2) / Math.PI) * LAT_BINS),
+  )
+  const col =
+    ((Math.floor(((lon + Math.PI) / (2 * Math.PI)) * LON_BINS) % LON_BINS) +
+      LON_BINS) %
+    LON_BINS
+  return row * LON_BINS + col
 }
 
-export function elevationAt(
-  p: THREE.Vector3,
-  items: WorldItem[],
-  tau = SEA_TAU,
-): number {
-  const d = densityAt(p, items)
-  if (d <= tau) return SEABED * (1 - d / tau)
-  return HMAX * Math.tanh((d - tau) * 1.1)
-}
+/** For each bin, the bins whose contents could be within CUTOFF. Static. */
+const BIN_NEIGHBORS: number[][] = (() => {
+  const centers: THREE.Vector3[] = []
+  for (let row = 0; row < LAT_BINS; row++) {
+    for (let col = 0; col < LON_BINS; col++) {
+      const lat = ((row + 0.5) / LAT_BINS) * Math.PI - Math.PI / 2
+      const lon = ((col + 0.5) / LON_BINS) * 2 * Math.PI - Math.PI
+      centers.push(
+        new THREE.Vector3(
+          Math.cos(lat) * Math.cos(lon),
+          Math.sin(lat),
+          Math.cos(lat) * Math.sin(lon),
+        ),
+      )
+    }
+  }
+  const margin = 0.26 // bin "radius" with slack
+  const lists: number[][] = []
+  for (let a = 0; a < BIN_COUNT; a++) {
+    const list: number[] = []
+    for (let b = 0; b < BIN_COUNT; b++) {
+      if (centers[a].angleTo(centers[b]) < CUTOFF + margin * 2) list.push(b)
+    }
+    lists.push(list)
+  }
+  return lists
+})()
+
+// -- terrain colours ------------------------------------------------------------
 
 const BANDS: [number, THREE.Color][] = [
   [0.0, new THREE.Color('#b3a37c')], // seabed
@@ -61,8 +92,12 @@ function colorForHeight(h: number, out: THREE.Color): void {
 export class Globe {
   readonly group = new THREE.Group()
   readonly land: THREE.Mesh
-  private items: WorldItem[] = []
   private tau = SEA_TAU // sea level rises with density so land stays ~1/3 of the surface
+  // sampled item directions, binned for fast local density queries
+  private fieldX = new Float32Array(0)
+  private fieldY = new Float32Array(0)
+  private fieldZ = new Float32Array(0)
+  private bins: number[][] = []
 
   constructor() {
     const water = new THREE.Mesh(
@@ -89,12 +124,49 @@ export class Globe {
     this.update([])
   }
 
+  private setField(items: WorldItem[]): void {
+    let sampled = items
+    if (items.length > DENSITY_SAMPLE) {
+      sampled = []
+      const stride = items.length / DENSITY_SAMPLE
+      for (let i = 0; i < DENSITY_SAMPLE; i++) sampled.push(items[Math.floor(i * stride)])
+    }
+    const n = sampled.length
+    this.fieldX = new Float32Array(n)
+    this.fieldY = new Float32Array(n)
+    this.fieldZ = new Float32Array(n)
+    this.bins = Array.from({ length: BIN_COUNT }, () => [])
+    for (let i = 0; i < n; i++) {
+      const [x, y, z] = sampled[i].pos
+      this.fieldX[i] = x
+      this.fieldY[i] = y
+      this.fieldZ[i] = z
+      this.bins[binIndex(x, y, z)].push(i)
+    }
+  }
+
+  private densityAt(x: number, y: number, z: number): number {
+    let d = 0
+    const inv = 1 / (KERNEL_SIGMA * KERNEL_SIGMA)
+    for (const bin of BIN_NEIGHBORS[binIndex(x, y, z)]) {
+      for (const i of this.bins[bin]) {
+        const dot = x * this.fieldX[i] + y * this.fieldY[i] + z * this.fieldZ[i]
+        if (dot < COS_CUTOFF) continue
+        const ang = Math.acos(dot > 1 ? 1 : dot)
+        d += Math.exp(-ang * ang * inv)
+      }
+    }
+    return d
+  }
+
   elevation(p: THREE.Vector3): number {
-    return elevationAt(p, this.items, this.tau)
+    const d = this.densityAt(p.x, p.y, p.z)
+    if (d <= this.tau) return SEABED * (1 - d / this.tau)
+    return HMAX * Math.tanh((d - this.tau) * 1.1)
   }
 
   update(items: WorldItem[]): void {
-    this.items = items
+    this.setField(items)
     const geometry = new THREE.IcosahedronGeometry(1, DETAIL).toNonIndexed()
     const pos = geometry.attributes.position as THREE.BufferAttribute
     const n = pos.count
@@ -106,7 +178,7 @@ export class Globe {
     const densities = new Float32Array(n)
     for (let i = 0; i < n; i++) {
       v.fromBufferAttribute(pos, i).normalize()
-      densities[i] = densityAt(v, items)
+      densities[i] = this.densityAt(v.x, v.y, v.z)
     }
     const sorted = Float32Array.from(densities).sort()
     this.tau = Math.max(SEA_TAU, sorted[Math.floor(n * 0.67)])

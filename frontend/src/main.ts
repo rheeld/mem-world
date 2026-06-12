@@ -183,6 +183,78 @@ function cardAltitude(p: THREE.Vector3): number {
   return 1 + Math.max(0, globe.elevation(p)) + CARD_ANCHOR_ALTITUDE
 }
 
+// -- lazy card pool ------------------------------------------------------------
+// 10k canvas-textured sprites would eat gigabytes of GPU memory; only the
+// cards near the camera target exist, respawned as the view moves.
+
+const CARD_LIMIT = 350
+const ALL_CARDS_BELOW = 600 // small worlds keep every card alive
+let cardsDirty = true
+const lastCardTarget = new THREE.Vector3(0, 0, 0)
+let lastCardDistance = -1
+
+function spawnCard(item: WorldItem): THREE.Sprite {
+  const sprite = makeCard(item, globe.elevation(new THREE.Vector3(...item.pos)))
+  sprite.material.clippingPlanes = [horizonPlane]
+  const accent = groupColors.get(item.id)
+  sprite.userData.groupColor = accent ? new THREE.Color(accent) : null
+  const target = (sprite.userData.normal as THREE.Vector3).clone()
+  const prev = lastPositions.get(item.id)
+  if (prev && prev.angleTo(target) > 0.004) {
+    // start at the old spot and glide to the new one
+    sprite.userData.normal = prev.clone()
+    sprite.position.copy(prev).multiplyScalar(cardAltitude(prev))
+    sprite.userData.glideTo = target
+  }
+  lastPositions.set(item.id, target)
+  return sprite
+}
+
+function updateVisibleCards(): void {
+  if (!world) return
+  const total = world.items.length
+  if (total > ALL_CARDS_BELOW && !cards.visible) return
+  const target = controls.target.clone().normalize()
+  const moved =
+    cardsDirty ||
+    target.angleTo(lastCardTarget) > 0.04 ||
+    Math.abs(controls.viewDistance - lastCardDistance) > 0.12 ||
+    (cards.visible && cards.children.length === 0 && total > 0)
+  if (!moved) return
+  cardsDirty = false
+  lastCardTarget.copy(target)
+  lastCardDistance = controls.viewDistance
+
+  let wanted: WorldItem[]
+  if (total <= ALL_CARDS_BELOW) {
+    wanted = world.items
+  } else {
+    const radius = Math.min(1.2, Math.max(0.3, controls.viewDistance * 1.3))
+    const cos = Math.cos(radius)
+    const scored: [number, WorldItem][] = []
+    for (const item of world.items) {
+      const dot =
+        target.x * item.pos[0] + target.y * item.pos[1] + target.z * item.pos[2]
+      if (dot > cos) scored.push([dot, item])
+    }
+    scored.sort((a, b) => b[0] - a[0])
+    wanted = scored.slice(0, CARD_LIMIT).map((s) => s[1])
+  }
+  const wantedIds = new Set(wanted.map((i) => i.id))
+  for (const child of [...cards.children]) {
+    const sprite = child as THREE.Sprite
+    const item = sprite.userData.item as WorldItem
+    if (wantedIds.has(item.id)) continue
+    if (sprite === movingCard || item.id === selectedId) continue // never mid-action
+    cards.remove(sprite)
+    disposeCard(sprite)
+  }
+  const have = new Set(cards.children.map((c) => (c.userData.item as WorldItem).id))
+  for (const item of wanted) {
+    if (!have.has(item.id)) cards.add(spawnCard(item))
+  }
+}
+
 function rebuild(): void {
   if (!world) return
   globe.update(world.items)
@@ -190,20 +262,7 @@ function rebuild(): void {
     cards.remove(child)
     disposeCard(child as THREE.Sprite)
   }
-  for (const item of world.items) {
-    const sprite = makeCard(item, globe.elevation(new THREE.Vector3(...item.pos)))
-    sprite.material.clippingPlanes = [horizonPlane]
-    const target = (sprite.userData.normal as THREE.Vector3).clone()
-    const prev = lastPositions.get(item.id)
-    if (prev && prev.angleTo(target) > 0.004) {
-      // start at the old spot and glide to the new one
-      sprite.userData.normal = prev.clone()
-      sprite.position.copy(prev).multiplyScalar(cardAltitude(prev))
-      sprite.userData.glideTo = target
-    }
-    lastPositions.set(item.id, target)
-    cards.add(sprite)
-  }
+  cardsDirty = true
   for (const id of [...lastPositions.keys()]) {
     if (!world.items.some((i) => i.id === id)) lastPositions.delete(id)
   }
@@ -213,7 +272,11 @@ function rebuild(): void {
   const mid = computeClusters(world.items, LABEL_LEVELS[1].radius)
   const top = computeSuperClusters(mid)
   relabelUnderParents(mid)
-  const fine = subdivide(mid, LABEL_LEVELS[2].radius)
+  let fine = subdivide(mid, LABEL_LEVELS[2].radius)
+  // label sprites carry canvas textures — cap the fine level at big scale
+  if (fine.length > 250) {
+    fine = [...fine].sort((a, b) => b.items.length - a.items.length).slice(0, 250)
+  }
   levelClusters = [top, mid, fine]
   clusters = mid
   groupColors.clear()
@@ -238,11 +301,6 @@ function rebuild(): void {
       group.add(sprite)
     }
   })
-  for (const child of cards.children) {
-    const sprite = child as THREE.Sprite
-    const accent = groupColors.get((sprite.userData.item as WorldItem).id)
-    sprite.userData.groupColor = accent ? new THREE.Color(accent) : null
-  }
   const mini = (cs: Cluster[]) =>
     cs.map((c) => ({ center: c.center, label: c.label, count: c.items.length }))
   minimap.setWorld(world.items, {
@@ -758,10 +816,17 @@ function buildTree(items: WorldItem[]): TreeDir {
   return root
 }
 
+function treeSize(node: TreeDir): number {
+  let n = node.files.length
+  for (const dir of node.dirs.values()) n += treeSize(dir)
+  return n
+}
+
 function renderTreeHtml(node: TreeDir): string {
   let html = '<ul>'
   for (const [name, dir] of node.dirs) {
-    html += `<li><details open><summary>${escapeHtml(name)}</summary>${renderTreeHtml(dir)}</details></li>`
+    const open = treeSize(dir) <= 50 ? ' open' : '' // big folders start folded
+    html += `<li><details${open}><summary>${escapeHtml(name)}</summary>${renderTreeHtml(dir)}</details></li>`
   }
   for (const file of node.files) {
     html += `<li class="tree-file" data-id="${file.id}"><span class="glyph ${file.kind}">${
@@ -815,6 +880,7 @@ renderer.setAnimationLoop(() => {
   lastFrame = now
   controls.update(now)
   applyLod()
+  updateVisibleCards()
   updateGlides(dt)
   minimap.draw(controls.target)
   renderer.render(scene, camera)

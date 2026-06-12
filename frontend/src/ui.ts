@@ -167,14 +167,19 @@ export class UI {
     const breakdown = [...counts.entries()]
       .map(([k, n]) => `${n} ${k}${n > 1 ? 's' : ''}`)
       .join(' · ')
-    const rows = region.items
-      .map(
-        (i) =>
-          `<li class="region-item" data-id="${i.id}">
-            <span class="glyph ${i.kind}">${KIND_GLYPH[i.kind] ?? '·'}</span>
-            ${escapeHtml(i.title)}</li>`,
-      )
-      .join('')
+    const shown = region.items.slice(0, 150)
+    const rows =
+      shown
+        .map(
+          (i) =>
+            `<li class="region-item" data-id="${i.id}">
+              <span class="glyph ${i.kind}">${KIND_GLYPH[i.kind] ?? '·'}</span>
+              ${escapeHtml(i.title)}</li>`,
+        )
+        .join('') +
+      (region.items.length > shown.length
+        ? `<li class="kind-breakdown">…and ${region.items.length - shown.length} more</li>`
+        : '')
     this.panel.innerHTML = `
       <button class="close" title="close (esc)">×</button>
       <div class="kind">region</div>

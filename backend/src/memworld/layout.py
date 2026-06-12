@@ -52,14 +52,17 @@ def _umap_sphere(vecs: np.ndarray, seed: int) -> np.ndarray | None:
         import umap
 
         nn = int(min(15, max(2, len(vecs) - 1)))
-        reducer = umap.UMAP(
+        kwargs: dict = dict(
             n_components=2,
             metric="cosine",
             output_metric="haversine",
             n_neighbors=nn,
             min_dist=0.4,
-            random_state=seed,
         )
+        if len(vecs) < 2000:
+            kwargs["random_state"] = seed  # determinism for small worlds;
+            # big worlds need the parallelism more than the reproducibility
+        reducer = umap.UMAP(**kwargs)
         emb = reducer.fit_transform(vecs)
     except Exception:
         log.exception("spherical UMAP failed; falling back to greedy layout")
@@ -110,6 +113,25 @@ def place_near(
     return _normalize(p)
 
 
+def _knn(vecs: np.ndarray, k: int, sim_floor: float) -> tuple[np.ndarray, np.ndarray]:
+    """Top-k cosine neighbours, computed in row blocks so big worlds never
+    materialise the full n x n similarity matrix at once."""
+    n = len(vecs)
+    v = np.asarray(vecs, dtype=np.float32)
+    nbr = np.empty((n, k), dtype=np.int64)
+    nbr_w = np.empty((n, k), dtype=np.float64)
+    block = 2048
+    for start in range(0, n, block):
+        end = min(start + block, n)
+        sims = v[start:end] @ v.T
+        sims[np.arange(end - start), np.arange(start, end)] = -np.inf  # no self
+        idx = np.argpartition(-sims, k, axis=1)[:, :k]
+        w = np.take_along_axis(sims, idx, axis=1)
+        nbr[start:end] = idx
+        nbr_w[start:end] = np.clip(w.astype(np.float64) - sim_floor, 0.0, None)
+    return nbr, nbr_w
+
+
 def settle(
     pos: np.ndarray,
     vecs: np.ndarray,
@@ -123,8 +145,8 @@ def settle(
     """Force relaxation on the sphere. Attraction acts only on kNN pairs whose
     cosine similarity clears sim_floor (raw cosines are always positive, so
     without the floor the whole world collapses into one clump). Inverse-square
-    repulsion between all pairs spreads clusters over the sphere and doubles as
-    collision avoidance."""
+    repulsion spreads clusters over the sphere and doubles as collision
+    avoidance — exact for small worlds, sampled (with rescaling) for big ones."""
     n = len(pos)
     pos = _normalize(np.asarray(pos, dtype=np.float64))
     if n < 3:
@@ -132,13 +154,11 @@ def settle(
     if pinned_mask is None:
         pinned_mask = np.zeros(n, dtype=bool)
 
-    sims = vecs @ vecs.T
     k = min(6, n - 1)
-    nbr = np.argsort(-sims, axis=1)[:, 1 : k + 1]
-    nbr_w = np.clip(np.take_along_axis(sims, nbr, axis=1) - sim_floor, 0.0, None)
+    nbr, nbr_w = _knn(vecs, k, sim_floor)
 
-    # exact pairwise repulsion is O(n^2); past this it would need a spatial index
     exact_repel = n <= 2500
+    rng = np.random.default_rng(11)
 
     for _ in range(steps):
         force = ((pos[nbr] - pos[:, None, :]) * nbr_w[..., None]).sum(axis=1) * attract
@@ -149,6 +169,15 @@ def settle(
             force += ((diff / dist[..., None]) / (dist**2 + 1e-4)[..., None]).sum(
                 axis=1
             ) * repel
+        else:
+            m = min(384, n - 1)
+            sample = rng.choice(n, m, replace=False)
+            diff = pos[:, None, :] - pos[sample][None, :, :]
+            dist = np.linalg.norm(diff, axis=-1)
+            dist[dist < 1e-9] = 1e9  # self-pairs in the sample
+            force += ((diff / dist[..., None]) / (dist**2 + 1e-4)[..., None]).sum(
+                axis=1
+            ) * (repel * n / m)
         # clamp per-item displacement for stability
         mag = np.linalg.norm(force, axis=1, keepdims=True)
         force *= np.minimum(1.0, max_step / np.maximum(mag, 1e-12))

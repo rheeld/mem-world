@@ -12,7 +12,7 @@ from . import db as dbm
 from . import layout
 from .config import Config
 from .embeddings import Embedder
-from .vault import MD_EXTS, content_hash, iter_vault_files, parse_file
+from .vault import MD_EXTS, Parsed, content_hash, iter_vault_files, parse_file
 
 log = logging.getLogger("memworld.world")
 
@@ -51,47 +51,64 @@ class World:
 
     def scan(self) -> None:
         """Full vault sweep: ingest new/changed files, drop deleted ones,
-        then run a layout pass. Hash-gated, so cheap when nothing changed."""
+        then run a layout pass. Hash-gated, so cheap when nothing changed.
+        Parsing and embedding happen OUTSIDE the lock (a bulk import would
+        otherwise block the API for minutes) and embedding is batched."""
         self.scanning = True
         try:
             with self.lock:
-                changed = False
-                seen: set[str] = set()
                 known = {
-                    r["path"]: r
+                    r["path"]: dict(r)
                     for r in self.db.execute("SELECT id, path, content_hash FROM items")
                 }
-                for f in iter_vault_files(self.cfg.vault):
-                    rel = str(f.relative_to(self.cfg.vault))
-                    seen.add(rel)
-                    h = content_hash(f)
-                    row = known.get(rel)
-                    if row is None or row["content_hash"] != h:
-                        if self._ingest(f, rel, h):
-                            changed = True
-                for rel, row in known.items():
-                    if rel not in seen:
-                        self.db.execute("DELETE FROM items WHERE id=?", (row["id"],))
-                        if dbm.has_vec_table(self.db):
-                            self.db.execute(
-                                "DELETE FROM item_vec WHERE item_id=?", (row["id"],)
-                            )
-                        changed = True
-                if changed:
-                    self._rebuild_links()
-                    self._layout_pass()
-                    self.db.commit()
-                    self._bump()
+            seen: set[str] = set()
+            pending: list[tuple[Path, str, str, Parsed]] = []
+            for f in iter_vault_files(self.cfg.vault):
+                rel = str(f.relative_to(self.cfg.vault))
+                seen.add(rel)
+                h = content_hash(f)
+                row = known.get(rel)
+                if row is None or row["content_hash"] != h:
+                    parsed = parse_file(f)
+                    if parsed is not None:
+                        pending.append((f, rel, h, parsed))
+            removed = [row for rel, row in known.items() if rel not in seen]
+            if not pending and not removed:
+                return
+
+            vecs = None
+            if pending:
+                texts = [
+                    f"{p.title}\n{' '.join(p.tags)}\n{p.text}"[:EMBED_TEXT_LIMIT]
+                    for _, _, _, p in pending
+                ]
+                chunks = []
+                batch = 128
+                for i in range(0, len(texts), batch):
+                    chunks.append(self.embedder.embed(texts[i : i + batch]))
+                    if len(texts) > 500:
+                        log.info("embedded %d/%d", min(i + batch, len(texts)), len(texts))
+                vecs = np.vstack(chunks)
+
+            with self.lock:
+                if pending:
+                    self._ensure_vec()
+                    for (f, rel, h, parsed), vec in zip(pending, vecs):
+                        self._upsert(f, rel, h, parsed, vec)
+                for row in removed:
+                    self.db.execute("DELETE FROM items WHERE id=?", (row["id"],))
+                    if dbm.has_vec_table(self.db):
+                        self.db.execute(
+                            "DELETE FROM item_vec WHERE item_id=?", (row["id"],)
+                        )
+                self._rebuild_links()
+                self._layout_pass()
+                self.db.commit()
+                self._bump()
         finally:
             self.scanning = False
 
-    def _ingest(self, f: Path, rel: str, h: str) -> bool:
-        parsed = parse_file(f)
-        if parsed is None:
-            return False
-        self._ensure_vec()
-        embed_text = f"{parsed.title}\n{' '.join(parsed.tags)}\n{parsed.text}"[:EMBED_TEXT_LIMIT]
-        vec = self.embedder.embed([embed_text])[0]
+    def _upsert(self, f: Path, rel: str, h: str, parsed: Parsed, vec: np.ndarray) -> bool:
         st = f.stat()
         existing = self.db.execute("SELECT id FROM items WHERE path=?", (rel,)).fetchone()
         if existing:
@@ -178,6 +195,7 @@ class World:
             return
         # cold start / bulk arrival -> full layout; trickle -> incremental
         if len(unpositioned) >= max(3, 0.25 * len(rows)):
+            log.info("full layout of %d items (UMAP + settle)…", len(rows))
             ids = [r["id"] for r in rows]
             vecs = np.stack([vec_map[i] for i in ids])
             pinned = {
@@ -328,7 +346,9 @@ class World:
             ).fetchall()
             vec_map = self._load_vectors()
             rows = [r for r in rows if r["id"] in vec_map]
-            if len(rows) < 5:
+            # drift is for living, human-scale worlds; at bulk-import scale the
+            # per-tick settle would be too heavy (and the world is mostly static)
+            if len(rows) < 5 or len(rows) > 4000:
                 return
             ids = [r["id"] for r in rows]
             pos = np.array([[r["x"], r["y"], r["z"]] for r in rows])

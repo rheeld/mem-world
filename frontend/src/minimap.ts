@@ -147,9 +147,14 @@ export class Minimap {
       ctx.stroke()
     }
 
-    // land blobs
+    // land blobs (sampled at scale — they're a density wash, not an index)
+    let blobItems = this.items
+    if (blobItems.length > 1500) {
+      const stride = blobItems.length / 1500
+      blobItems = Array.from({ length: 1500 }, (_, i) => this.items[Math.floor(i * stride)])
+    }
     const r = Math.min(11 * this.zoom, 34)
-    for (const item of this.items) {
+    for (const item of blobItems) {
       const [mx, my] = toMap(...item.pos)
       const [x, y] = this.toCanvas(mx, my)
       if (x < -r || x > W + r || y < -r || y > H + r) continue
