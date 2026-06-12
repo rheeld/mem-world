@@ -30,7 +30,13 @@ const app = document.getElementById('app')!
 const renderer = new THREE.WebGLRenderer({ antialias: true })
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
 renderer.setSize(innerWidth, innerHeight)
+renderer.localClippingEnabled = true
 app.appendChild(renderer.domElement)
+
+// cards/labels skip the depth test (terrain would slice them), so the
+// planet's own occlusion is emulated with one clipping plane at the horizon:
+// sprites rise gradually over the limb instead of popping into existence
+const horizonPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0)
 
 const scene = new THREE.Scene()
 scene.background = new THREE.Color('#0c1322')
@@ -149,6 +155,7 @@ function rebuild(): void {
   }
   for (const item of world.items) {
     const sprite = makeCard(item, globe.elevation(new THREE.Vector3(...item.pos)))
+    sprite.material.clippingPlanes = [horizonPlane]
     const target = (sprite.userData.normal as THREE.Vector3).clone()
     const prev = lastPositions.get(item.id)
     if (prev && prev.angleTo(target) > 0.004) {
@@ -169,7 +176,9 @@ function rebuild(): void {
   }
   clusters = computeClusters(world.items)
   for (const cluster of clusters) {
-    labels.add(makeClusterSprite(cluster, globe.elevation(cluster.center)))
+    const sprite = makeClusterSprite(cluster, globe.elevation(cluster.center))
+    sprite.material.clippingPlanes = [horizonPlane]
+    labels.add(sprite)
   }
   drawArcs()
   ui.setStatus(
@@ -601,21 +610,24 @@ function applyLod(): void {
   const labelOpacity = smoothstep(d, LABELS_FADE[0], LABELS_FADE[1])
   cards.visible = cardOpacity > 0.02
   labels.visible = labelOpacity > 0.02
-  // cards and labels skip the depth test (terrain would slice them), so
-  // occlude the ones past the planet's limb by hand
+  // move the horizon clipping plane with the camera: fragments beyond the
+  // limb are shaved off, so sprites rise smoothly over the curve
   const camDir = camera.position.clone().normalize()
   const horizon = 1 / Math.max(camera.position.length(), 1.0001)
+  horizonPlane.normal.copy(camDir)
+  horizonPlane.constant = -horizon + 0.012 // slack for terrain/card altitude
+  // coarse cull: fully-clipped sprites must not swallow raycasts
   for (const child of cards.children) {
     const sprite = child as THREE.Sprite
     sprite.material.opacity = cardOpacity
     const n = sprite.userData.normal as THREE.Vector3
-    sprite.visible = n.dot(camDir) > horizon - 0.015
+    sprite.visible = n.dot(camDir) > horizon - 0.08
   }
   for (const child of labels.children) {
     const sprite = child as THREE.Sprite
     sprite.material.opacity = labelOpacity
     const center = (sprite.userData.cluster as Cluster).center
-    sprite.visible = center.dot(camDir) > horizon - 0.03
+    sprite.visible = center.dot(camDir) > horizon - 0.12
   }
 }
 
