@@ -33,8 +33,10 @@ def full_layout(
         return _normalize(np.array([[0.3, 0.45, 0.85]]))
 
     pos = None
+    from_umap = False
     if n >= UMAP_MIN_ITEMS:
         pos = _umap_sphere(vecs, seed)
+        from_umap = pos is not None
     if pos is None:
         pos = _greedy_layout(vecs, seed)
 
@@ -43,7 +45,56 @@ def full_layout(
         pos[i] = _normalize(np.asarray(p, dtype=np.float64))
         pinned_mask[i] = True
 
+    # UMAP's projection is used as-is: the settle pass (esp. its repulsion)
+    # was smearing the global structure. A collision-only declutter enforces
+    # the minimum spacing that keeps note cards non-overlapping at full zoom —
+    # purely local nudges, no long-range force, so the geography survives.
+    if from_umap:
+        return _declutter(pos, pinned_mask, _min_separation(n))
     return settle(pos, vecs, pinned_mask)
+
+
+def _min_separation(n: int) -> float:
+    """Matches the frontend's card scale (0.1 * sqrt(600/n), clamped) plus a
+    small gap, so flight paths stay visible between cards."""
+    scale = min(1.0, max(0.16, np.sqrt(600.0 / max(n, 1))))
+    return 0.105 * scale
+
+
+def _declutter(
+    pos: np.ndarray,
+    pinned_mask: np.ndarray,
+    min_sep: float,
+    iters: int = 180,
+    damping: float = 0.18,
+) -> np.ndarray:
+    """Push apart only pairs closer than min_sep; everything else is untouched.
+    Damped hard: full-strength pushes tunnel items through their neighbours and
+    interleave adjacent clusters — gentle pushes let dense clusters inflate
+    cohesively, preserving local ordering."""
+    from scipy.spatial import cKDTree
+
+    rng = np.random.default_rng(5)
+    pos = pos.copy()
+    anchored = pos[pinned_mask].copy()
+    for _ in range(iters):
+        tree = cKDTree(pos)
+        pairs = tree.query_pairs(min_sep, output_type="ndarray")
+        if len(pairs) == 0:
+            break
+        a, b = pairs[:, 0], pairs[:, 1]
+        diff = pos[a] - pos[b]
+        dist = np.linalg.norm(diff, axis=1, keepdims=True)
+        degenerate = dist[:, 0] < 1e-9
+        if degenerate.any():
+            diff[degenerate] = rng.normal(size=(int(degenerate.sum()), 3))
+            dist[degenerate] = np.linalg.norm(diff[degenerate], axis=1, keepdims=True)
+        push = (min_sep - dist) * damping * (diff / dist)
+        np.add.at(pos, a, push)
+        np.add.at(pos, b, -push)
+        pos[pinned_mask] = anchored
+        pos = _normalize(pos)
+    return pos
 
 
 def _umap_sphere(vecs: np.ndarray, seed: int) -> np.ndarray | None:

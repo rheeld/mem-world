@@ -43,7 +43,23 @@ const LABEL_LEVELS: LabelLevel[] = [
   { radius: 0.6, fadeIn: [1.0, 1.25], fadeOut: [1.9, 2.4], size: 1.0, flyDistance: 0.95 },
   { radius: 0.33, fadeIn: [0.62, 0.8], fadeOut: [1.05, 1.3], size: 0.74, flyDistance: 0.5 },
 ]
-const CARDS_FADE = [0.6, 1.0] as const
+// cards shrink as the world densifies (≈ 1/sqrt(n), like mean item spacing)
+// and the camera's min zoom shrinks with them: ground-level screen size stays
+// constant while the gaps between cards — and the flight paths crossing them —
+// stay visible. equivalent to growing the world, without rescaling positions.
+let worldScale = 1
+let cardsFadeLo = 0.6
+let cardsFadeHi = 1.0
+
+function applyWorldScale(n: number): void {
+  worldScale = THREE.MathUtils.clamp(Math.sqrt(600 / Math.max(n, 1)), 0.16, 1)
+  cardsFadeLo = 0.6 * worldScale
+  cardsFadeHi = Math.max(1.0 * worldScale, 0.45) // stay discoverable mid-zoom
+  controls.minDistance = 0.03 * worldScale
+  camera.near = Math.max(0.0008, 0.005 * worldScale)
+  camera.updateProjectionMatrix()
+}
+
 const ARC_COLOR = '#ff8a5c'
 const ARC_HOVER = '#ffd27a'
 // fine-cluster accent hues; member cards tint toward theirs while the fine
@@ -194,7 +210,11 @@ const lastCardTarget = new THREE.Vector3(0, 0, 0)
 let lastCardDistance = -1
 
 function spawnCard(item: WorldItem): THREE.Sprite {
-  const sprite = makeCard(item, globe.elevation(new THREE.Vector3(...item.pos)))
+  const sprite = makeCard(
+    item,
+    globe.elevation(new THREE.Vector3(...item.pos)),
+    worldScale,
+  )
   sprite.material.clippingPlanes = [horizonPlane]
   const accent = groupColors.get(item.id)
   sprite.userData.groupColor = accent ? new THREE.Color(accent) : null
@@ -257,6 +277,7 @@ function updateVisibleCards(): void {
 
 function rebuild(): void {
   if (!world) return
+  applyWorldScale(world.items.length)
   globe.update(world.items)
   for (const child of [...cards.children]) {
     cards.remove(child)
@@ -746,7 +767,7 @@ function bandOpacity(d: number, level: LabelLevel): number {
 
 function applyLod(): void {
   const d = controls.viewDistance
-  const cardOpacity = 1 - smoothstep(d, CARDS_FADE[0], CARDS_FADE[1])
+  const cardOpacity = 1 - smoothstep(d, cardsFadeLo, cardsFadeHi)
   cards.visible = cardOpacity > 0.02
   // move the horizon clipping plane with the camera: fragments beyond the
   // limb are shaved off, so sprites rise smoothly over the curve

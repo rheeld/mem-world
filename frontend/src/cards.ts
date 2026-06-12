@@ -157,8 +157,10 @@ function drawImageCard(
 }
 
 /** Cards are sprites: always camera-facing, never perspective-skewed —
- * a flag planted at its anchor point (sprite center sits at the notch tip). */
-export function makeCard(item: WorldItem, elevation = 0): THREE.Sprite {
+ * a flag planted at its anchor point (sprite center sits at the notch tip).
+ * `scale` shrinks the card's world footprint as the world densifies; the
+ * camera's min zoom shrinks with it, so ground-level screen size is constant. */
+export function makeCard(item: WorldItem, elevation = 0, scale = 1): THREE.Sprite {
   const canvas = document.createElement('canvas')
   canvas.width = CANVAS_W
   canvas.height = CANVAS_H
@@ -187,7 +189,7 @@ export function makeCard(item: WorldItem, elevation = 0): THREE.Sprite {
   const sprite = new THREE.Sprite(material)
   sprite.renderOrder = 15 // above terrain and arcs, below cluster labels
   sprite.center.set(0.5, 0) // anchor at the notch tip; the flag rises upward
-  sprite.scale.set(CARD_W, CARD_H, 1)
+  sprite.scale.set(CARD_W * scale, CARD_H * scale, 1)
   const p = new THREE.Vector3(...item.pos).normalize()
   sprite.position.copy(p).multiplyScalar(1 + Math.max(0, elevation) + CARD_ANCHOR_ALTITUDE)
   sprite.userData.item = item
