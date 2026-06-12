@@ -17,7 +17,8 @@ import {
   computeSuperClusters,
   disposeSprite,
   makeClusterSprite,
-  stripParentPrefixes,
+  relabelUnderParents,
+  subdivide,
   type Cluster,
 } from './clusters'
 import { GlobeControls } from './controls'
@@ -45,6 +46,18 @@ const LABEL_LEVELS: LabelLevel[] = [
 const CARDS_FADE = [0.6, 1.0] as const
 const ARC_COLOR = '#ff8a5c'
 const ARC_HOVER = '#ffd27a'
+// fine-cluster accent hues; member cards tint toward theirs while the fine
+// labels are on screen, so groupings stay trackable through the zoom
+const GROUP_PALETTE = [
+  '#d98a66',
+  '#7fa3d6',
+  '#a8c97e',
+  '#c9a3e0',
+  '#e0c069',
+  '#74c0b2',
+  '#dd8aa8',
+  '#b3bd6d',
+]
 
 const app = document.getElementById('app')!
 const renderer = new THREE.WebGLRenderer({ antialias: true })
@@ -85,6 +98,7 @@ const controls = new GlobeControls(camera, renderer.domElement, (dir) =>
 let world: WorldState | null = null
 let levelClusters: Cluster[][] = LABEL_LEVELS.map(() => [])
 let clusters: Cluster[] = [] // mid level — bookmarks/status/minimap granularity
+const groupColors = new Map<number, string>() // item id -> fine-cluster accent
 let selectedId: number | null = null
 let hovered: THREE.Object3D | null = null
 // cards glide between layout positions instead of teleporting
@@ -193,15 +207,20 @@ function rebuild(): void {
   for (const id of [...lastPositions.keys()]) {
     if (!world.items.some((i) => i.id === id)) lastPositions.delete(id)
   }
-  // mid + fine levels are geometric; the top level is semantic (by tag)
-  levelClusters = LABEL_LEVELS.map((level, li) =>
-    li === 0 ? [] : computeClusters(world!.items, level.radius),
-  )
-  levelClusters[0] = computeSuperClusters(levelClusters[1])
-  for (let li = 1; li < levelClusters.length; li++) {
-    stripParentPrefixes(levelClusters[li], levelClusters[li - 1])
-  }
-  clusters = levelClusters[1] ?? levelClusters[0]
+  // a true hierarchy: mid level is geometric, the top level merges by tag,
+  // and the fine level is computed INSIDE each region (true subsets) —
+  // children that equal their parent inherit its name; singletons get none
+  const mid = computeClusters(world.items, LABEL_LEVELS[1].radius)
+  const top = computeSuperClusters(mid)
+  relabelUnderParents(mid)
+  const fine = subdivide(mid, LABEL_LEVELS[2].radius)
+  levelClusters = [top, mid, fine]
+  clusters = mid
+  groupColors.clear()
+  fine.forEach((c, i) => {
+    c.color = GROUP_PALETTE[i % GROUP_PALETTE.length]
+    for (const item of c.items) groupColors.set(item.id, c.color)
+  })
   labelGroups.forEach((group, li) => {
     for (const child of [...group.children]) {
       group.remove(child)
@@ -212,12 +231,18 @@ function rebuild(): void {
         cluster,
         globe.elevation(cluster.center),
         LABEL_LEVELS[li].size,
+        cluster.color,
       )
       sprite.material.clippingPlanes = [horizonPlane]
       sprite.userData.level = li
       group.add(sprite)
     }
   })
+  for (const child of cards.children) {
+    const sprite = child as THREE.Sprite
+    const accent = groupColors.get((sprite.userData.item as WorldItem).id)
+    sprite.userData.groupColor = accent ? new THREE.Color(accent) : null
+  }
   const mini = (cs: Cluster[]) =>
     cs.map((c) => ({ center: c.center, label: c.label, count: c.items.length }))
   minimap.setWorld(world.items, {
@@ -671,10 +696,19 @@ function applyLod(): void {
   const horizon = 1 / Math.max(camera.position.length(), 1.0001)
   horizonPlane.normal.copy(camDir)
   horizonPlane.constant = -horizon + 0.012 // slack for terrain/card altitude
-  // coarse cull: fully-clipped sprites must not swallow raycasts
+  // coarse cull: fully-clipped sprites must not swallow raycasts.
+  // while fine-cluster labels are on screen, member cards tint subtly toward
+  // their group's accent so subgroups stay trackable through the zoom
+  const tint = bandOpacity(d, LABEL_LEVELS[LABEL_LEVELS.length - 1]) * 0.38
   for (const child of cards.children) {
     const sprite = child as THREE.Sprite
     sprite.material.opacity = cardOpacity
+    const groupColor = sprite.userData.groupColor as THREE.Color | null
+    if (groupColor && tint > 0.01) {
+      sprite.material.color.setRGB(1, 1, 1).lerp(groupColor, tint)
+    } else {
+      sprite.material.color.setRGB(1, 1, 1)
+    }
     const n = sprite.userData.normal as THREE.Vector3
     sprite.visible = n.dot(camDir) > horizon - 0.08
   }

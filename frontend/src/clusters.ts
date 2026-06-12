@@ -5,104 +5,24 @@ export interface Cluster {
   center: THREE.Vector3
   items: WorldItem[]
   label: string
-  /** label before parent-prefix stripping (hierarchy levels use this) */
-  origLabel?: string
+  /** the tag this label came from, when it came from one */
+  labelTag?: string
+  parent?: Cluster
+  /** group accent colour (fine clusters); cards of members tint toward it */
+  color?: string
 }
 
-function dominantTag(items: WorldItem[]): string | null {
-  const counts = new Map<string, number>()
-  for (const item of items) {
-    for (const tag of item.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1)
-  }
-  let best: string | null = null
-  let bestCount = 1 // a tag must appear at least twice to define a region
-  for (const [tag, count] of counts) {
-    if (count > bestCount) {
-      best = tag
-      bestCount = count
-    }
-  }
-  return best
-}
-
-/** Top LOD level: merge child regions that share a dominant tag into one
- * continent ("ART"), regardless of how far the topic sprawls — pure geometric
- * merging splits big domains. Untagged children join the nearest continent. */
-export function computeSuperClusters(children: Cluster[]): Cluster[] {
-  const byTag = new Map<string, Cluster[]>()
-  const untagged: Cluster[] = []
-  for (const child of children) {
-    const tag = dominantTag(child.items)
-    if (tag) {
-      let group = byTag.get(tag)
-      if (!group) byTag.set(tag, (group = []))
-      group.push(child)
-    } else {
-      untagged.push(child)
-    }
-  }
-  const fromGroup = (label: string, group: Cluster[]): Cluster => {
-    const items = group.flatMap((c) => c.items)
-    const center = group
-      .reduce(
-        (acc, c) => acc.addScaledVector(c.center, c.items.length),
-        new THREE.Vector3(),
-      )
-      .normalize()
-    return { center, items, label }
-  }
-  const supers = [...byTag.entries()].map(([tag, group]) =>
-    fromGroup(titleCase(tag), group),
-  )
-  for (const child of untagged) {
-    let best: Cluster | null = null
-    let bestAngle = 0.85
-    for (const s of supers) {
-      const a = s.center.angleTo(child.center)
-      if (a < bestAngle) {
-        bestAngle = a
-        best = s
-      }
-    }
-    if (best) {
-      best.items = best.items.concat(child.items)
-    } else {
-      supers.push({ center: child.center.clone(), items: child.items, label: child.label })
-    }
-  }
-  disambiguate(supers)
-  return supers
-}
-
-/** Children whose label repeats their parent region's name shed the prefix:
- * "ART · Artist" under "ART" becomes just "Artist". */
-export function stripParentPrefixes(children: Cluster[], parents: Cluster[]): void {
-  for (const child of children) {
-    let parent: Cluster | null = null
-    let best = Infinity
-    for (const p of parents) {
-      const a = p.center.angleTo(child.center)
-      if (a < best) {
-        best = a
-        parent = p
-      }
-    }
-    if (!parent) continue
-    for (const prefix of [parent.label, parent.origLabel ?? parent.label]) {
-      if (prefix && child.label.startsWith(`${prefix} · `)) {
-        child.origLabel = child.label
-        child.label = child.label.slice(prefix.length + 3)
-        break
-      }
-    }
-  }
-}
+// -- clustering -----------------------------------------------------------------
 
 /** Leader clustering on geodesic distance: items join the nearest cluster
  * CENTER within `radius`, so dense worlds can't chain into one mega-region
  * (single-linkage did exactly that). Two refinement passes settle centers.
  * Fine up to ~1k items; past that this moves to the backend. */
-export function computeClusters(items: WorldItem[], radius = 0.6): Cluster[] {
+export function computeClusters(
+  items: WorldItem[],
+  radius = 0.6,
+  exclude?: Set<string>,
+): Cluster[] {
   const dirs = items.map((i) => new THREE.Vector3(...i.pos))
   let centers: THREE.Vector3[] = []
   let assign: number[] = []
@@ -147,81 +67,47 @@ export function computeClusters(items: WorldItem[], radius = 0.6): Cluster[] {
     const center = idx
       .reduce((acc, i) => acc.add(dirs[i]), new THREE.Vector3())
       .normalize()
-    return { center, items: members, label: labelFor(members, center) }
+    const { label, tag } = labelFor(members, center, exclude)
+    return { center, items: members, label, labelTag: tag }
   })
   disambiguate(result)
   return result
 }
 
-/** Two regions named "Art" reads as a bug — give duplicates a second tag or
- * their most central title as a qualifier. */
-function disambiguate(clusters: Cluster[]): void {
-  const byLabel = new Map<string, Cluster[]>()
-  for (const c of clusters) {
-    let g = byLabel.get(c.label)
-    if (!g) byLabel.set(c.label, (g = []))
-    g.push(c)
-  }
-  for (const [label, group] of byLabel) {
-    if (group.length < 2) continue
-    for (const c of group) {
-      const counts = new Map<string, number>()
-      for (const m of c.items) {
-        for (const t of m.tags) {
-          if (titleCase(t) !== label) counts.set(t, (counts.get(t) ?? 0) + 1)
-        }
-      }
-      const second = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0]
-      if (second) {
-        c.label = `${label} · ${titleCase(second)}`
-      } else {
-        const central = centralTitle(c)
-        if (central && central !== label) c.label = `${label} · ${central}`
-      }
-    }
-    // second tags can collide too (two art clusters, both mostly #artist) —
-    // anything still duplicated falls back to its most central title
-    const seen = new Set<string>()
-    for (const c of group) {
-      if (seen.has(c.label)) c.label = `${label} · ${centralTitle(c)}`
-      seen.add(c.label)
-    }
-  }
-}
-
-function centralTitle(c: Cluster): string {
-  let pick = c.items[0]
-  let pickDist = Infinity
-  for (const m of c.items) {
-    const d = new THREE.Vector3(...m.pos).angleTo(c.center)
-    if (d < pickDist) {
-      pickDist = d
-      pick = m
-    }
-  }
-  const t = pick.title.replace(/_/g, ' ')
-  return t.length > 18 ? t.slice(0, 17).trimEnd() + '…' : t
-}
+// -- naming -----------------------------------------------------------------------
 
 function titleCase(s: string): string {
   if (s.length <= 3) return s.toUpperCase() // acronym tags: ml -> ML
   return s.replace(/[-_]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
 }
 
-function labelFor(members: WorldItem[], center: THREE.Vector3): string {
-  // prefer the dominant tag if it actually represents the cluster
+function labelFor(
+  members: WorldItem[],
+  center: THREE.Vector3,
+  exclude?: Set<string>,
+): { label: string; tag?: string } {
+  // prefer a tag that actually represents the cluster — but never one of the
+  // excluded tags (ancestor names, or tags ubiquitous in the parent: those
+  // don't distinguish this group from its siblings)
   const counts = new Map<string, number>()
-  for (const m of members) for (const t of m.tags) counts.set(t, (counts.get(t) ?? 0) + 1)
+  for (const m of members) {
+    for (const t of m.tags) {
+      if (!exclude?.has(t)) counts.set(t, (counts.get(t) ?? 0) + 1)
+    }
+  }
   let best: string | null = null
-  let bestCount = 0
+  let bestCount = 1
   for (const [tag, count] of counts) {
     if (count > bestCount) {
       best = tag
       bestCount = count
     }
   }
-  if (best && bestCount >= 2) return titleCase(best)
-  // fallback: title of the most central member
+  if (best) return { label: titleCase(best), tag: best }
+  return { label: centralTitle(members, center) }
+}
+
+function centralTitle(members: WorldItem[], center: THREE.Vector3): string {
   let pick = members[0]
   let pickDist = Infinity
   for (const m of members) {
@@ -231,14 +117,169 @@ function labelFor(members: WorldItem[], center: THREE.Vector3): string {
       pick = m
     }
   }
-  const title = pick.title.replace(/_/g, ' ')
-  return title.length > 24 ? title.slice(0, 23).trimEnd() + '…' : title
+  const t = pick.title.replace(/_/g, ' ')
+  return t.length > 24 ? t.slice(0, 23).trimEnd() + '…' : t
 }
+
+function dominantTag(items: WorldItem[]): string | null {
+  const counts = new Map<string, number>()
+  for (const item of items) {
+    for (const tag of item.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1)
+  }
+  let best: string | null = null
+  let bestCount = 1
+  for (const [tag, count] of counts) {
+    if (count > bestCount) {
+      best = tag
+      bestCount = count
+    }
+  }
+  return best
+}
+
+/** Two regions named "Art" reads as a bug — qualify duplicates. */
+function disambiguate(clusters: Cluster[]): void {
+  const byLabel = new Map<string, Cluster[]>()
+  for (const c of clusters) {
+    let g = byLabel.get(c.label)
+    if (!g) byLabel.set(c.label, (g = []))
+    g.push(c)
+  }
+  for (const [label, group] of byLabel) {
+    if (group.length < 2) continue
+    const seen = new Set<string>()
+    for (const c of group) {
+      if (seen.has(c.label)) {
+        c.label = `${label} · ${centralTitle(c.items, c.center)}`
+      }
+      seen.add(c.label)
+    }
+  }
+}
+
+// -- hierarchy ----------------------------------------------------------------------
+
+/** Tags that must not name a child of `parent`: every ancestor's own name-tag,
+ * plus any tag so common in the parent that it distinguishes nothing. */
+function parentExclusions(parent: Cluster): Set<string> {
+  const exclude = new Set<string>()
+  let p: Cluster | undefined = parent
+  while (p) {
+    if (p.labelTag) exclude.add(p.labelTag)
+    p = p.parent
+  }
+  const counts = new Map<string, number>()
+  for (const item of parent.items) {
+    for (const tag of item.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1)
+  }
+  for (const [tag, count] of counts) {
+    if (count / parent.items.length >= 0.6) exclude.add(tag)
+  }
+  return exclude
+}
+
+/** Top LOD level: merge child regions that share a dominant tag into one
+ * continent ("ART"), regardless of how far the topic sprawls — pure geometric
+ * merging splits big domains. Untagged children join the nearest continent. */
+export function computeSuperClusters(children: Cluster[]): Cluster[] {
+  const byTag = new Map<string, Cluster[]>()
+  const untagged: Cluster[] = []
+  for (const child of children) {
+    const tag = dominantTag(child.items)
+    if (tag) {
+      let group = byTag.get(tag)
+      if (!group) byTag.set(tag, (group = []))
+      group.push(child)
+    } else {
+      untagged.push(child)
+    }
+  }
+  const supers: Cluster[] = []
+  for (const [tag, group] of byTag) {
+    const items = group.flatMap((c) => c.items)
+    const center = group
+      .reduce(
+        (acc, c) => acc.addScaledVector(c.center, c.items.length),
+        new THREE.Vector3(),
+      )
+      .normalize()
+    const sup: Cluster = { center, items, label: titleCase(tag), labelTag: tag }
+    for (const c of group) c.parent = sup
+    supers.push(sup)
+  }
+  for (const child of untagged) {
+    let best: Cluster | null = null
+    let bestAngle = 0.85
+    for (const s of supers) {
+      const a = s.center.angleTo(child.center)
+      if (a < bestAngle) {
+        bestAngle = a
+        best = s
+      }
+    }
+    if (best) {
+      best.items = best.items.concat(child.items)
+      child.parent = best
+    } else {
+      const sup: Cluster = {
+        center: child.center.clone(),
+        items: child.items,
+        label: child.label,
+        labelTag: child.labelTag,
+      }
+      child.parent = sup
+      supers.push(sup)
+    }
+  }
+  disambiguate(supers)
+  return supers
+}
+
+/** Re-name children now that their parents exist. A child identical to its
+ * parent INHERITS the parent's label (same group, same name — renaming it
+ * would lie); others get the most distinctive name available. */
+export function relabelUnderParents(children: Cluster[]): void {
+  for (const c of children) {
+    const p = c.parent
+    if (!p) continue
+    if (c.items.length === p.items.length) {
+      c.label = p.label
+      c.labelTag = p.labelTag
+      continue
+    }
+    const { label, tag } = labelFor(c.items, c.center, parentExclusions(p))
+    c.label = label
+    c.labelTag = tag
+  }
+  disambiguate(children)
+}
+
+/** Build the next level INSIDE each parent, so children are true subsets.
+ * Parents that don't subdivide produce no children (their label simply hands
+ * over to the cards); singleton children are skipped — the card is the label. */
+export function subdivide(parents: Cluster[], radius: number): Cluster[] {
+  const out: Cluster[] = []
+  for (const parent of parents) {
+    if (parent.items.length < 3) continue
+    const subs = computeClusters(parent.items, radius, parentExclusions(parent))
+    if (subs.length <= 1) continue
+    for (const sub of subs) {
+      if (sub.items.length < 2) continue
+      sub.parent = parent
+      out.push(sub)
+    }
+  }
+  disambiguate(out)
+  return out
+}
+
+// -- sprites -----------------------------------------------------------------------
 
 export function makeClusterSprite(
   cluster: Cluster,
   elevation: number,
   sizeMul = 1,
+  accent?: string,
 ): THREE.Sprite {
   const canvas = document.createElement('canvas')
   canvas.width = 720
@@ -252,7 +293,8 @@ export function makeClusterSprite(
   ctx.font = '400 40px Georgia, serif'
   const cw = ctx.measureText(countText).width
   const pad = 40
-  const pillW = Math.min(688, tw + cw + pad * 2 + 34)
+  const accentW = accent ? 34 : 0
+  const pillW = Math.min(688, tw + cw + pad * 2 + 34 + accentW)
   const pillH = 108
   const x0 = (canvas.width - pillW) / 2
   const y0 = (canvas.height - pillH) / 2
@@ -269,10 +311,22 @@ export function makeClusterSprite(
   ctx.lineWidth = 3
   ctx.stroke()
 
+  if (accent) {
+    ctx.fillStyle = accent
+    ctx.beginPath()
+    ctx.arc(x0 + pad - 6, canvas.height / 2 + 2, 11, 0, Math.PI * 2)
+    ctx.fill()
+  }
+
   ctx.fillStyle = '#f5eed9'
   ctx.font = '600 58px Georgia, serif'
   ctx.textBaseline = 'middle'
-  ctx.fillText(text, x0 + pad, canvas.height / 2 + 2, pillW - pad * 2 - cw - 30)
+  ctx.fillText(
+    text,
+    x0 + pad + accentW,
+    canvas.height / 2 + 2,
+    pillW - pad * 2 - cw - 30 - accentW,
+  )
   ctx.fillStyle = 'rgba(245, 238, 217, 0.62)'
   ctx.font = '400 40px Georgia, serif'
   ctx.fillText(countText, x0 + pillW - pad - cw, canvas.height / 2 + 4)

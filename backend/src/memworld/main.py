@@ -71,7 +71,8 @@ class SetPosition(BaseModel):
 @app.get("/api/status")
 def status():
     w = _world()
-    count = w.db.execute("SELECT COUNT(*) AS n FROM items").fetchone()["n"]
+    with w.lock:
+        count = w.db.execute("SELECT COUNT(*) AS n FROM items").fetchone()["n"]
     return {
         "rev": w.rev,
         "items": count,
@@ -125,7 +126,8 @@ async def upload_file(file: UploadFile = File(...), pos: str | None = Form(None)
     dest.write_bytes(await file.read())
     w.scan()
     rel = str(dest.relative_to(w.cfg.vault))
-    row = w.db.execute("SELECT id FROM items WHERE path=?", (rel,)).fetchone()
+    with w.lock:
+        row = w.db.execute("SELECT id FROM items WHERE path=?", (rel,)).fetchone()
     if row is None:
         raise HTTPException(500, "file saved but failed to ingest")
     if pos:
@@ -161,7 +163,8 @@ def delete_item(item_id: int):
 @app.get("/api/items/{item_id}/file")
 def get_item_file(item_id: int):
     w = _world()
-    r = w.db.execute("SELECT path FROM items WHERE id=?", (item_id,)).fetchone()
+    with w.lock:
+        r = w.db.execute("SELECT path FROM items WHERE id=?", (item_id,)).fetchone()
     if r is None:
         raise HTTPException(404, "no such item")
     f = w.cfg.vault / r["path"]
