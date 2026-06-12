@@ -74,6 +74,16 @@ class World:
                         pending.append((f, rel, h, parsed))
             removed = [row for rel, row in known.items() if rel not in seen]
             if not pending and not removed:
+                # files unchanged, but a re-layout may have been requested by
+                # nulling positions (or a previous layout crashed midway)
+                with self.lock:
+                    n_unpositioned = self.db.execute(
+                        "SELECT COUNT(*) AS n FROM items WHERE x IS NULL"
+                    ).fetchone()["n"]
+                    if n_unpositioned:
+                        self._layout_pass()
+                        self.db.commit()
+                        self._bump()
                 return
 
             vecs = None
@@ -355,7 +365,7 @@ class World:
             vecs = np.stack([vec_map[i] for i in ids])
             pinned = np.array([bool(r["pinned"]) for r in rows])
             new = layout.settle(
-                pos, vecs, pinned, steps=1, attract=0.1, repel=0.002, max_step=0.0035
+                pos, vecs, pinned, steps=1, attract=0.1, repel_total=0.15, max_step=0.0035
             )
             if float(np.abs(new - pos).max()) < 1e-7:
                 return

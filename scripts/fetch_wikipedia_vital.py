@@ -15,7 +15,9 @@ import json
 import re
 import shutil
 import sys
+import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -28,17 +30,32 @@ STAGING = Path("/tmp/memworld-wiki-staging")
 VAULT_WIKI = Path(__file__).resolve().parents[1] / "vault" / "wiki"
 
 
+# global politeness throttle: ~3 requests/second across all workers
+_throttle = threading.Lock()
+_last_request = [0.0]
+MIN_INTERVAL = 0.35
+
+
 def api(params: dict) -> dict:
     qs = urllib.parse.urlencode({**params, "format": "json"})
     req = urllib.request.Request(f"{API}?{qs}", headers=UA)
     last: Exception | None = None
-    for attempt in range(5):
+    for attempt in range(7):
+        with _throttle:
+            wait = _last_request[0] + MIN_INTERVAL - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            _last_request[0] = time.monotonic()
         try:
             with urllib.request.urlopen(req, timeout=60) as r:
                 return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            last = e
+            # rate limited: back off hard before trying again
+            time.sleep(15 * (attempt + 1) if e.code == 429 else 2 * (attempt + 1))
         except Exception as e:  # noqa: BLE001 — retry everything politely
             last = e
-            time.sleep(1.5 * (attempt + 1))
+            time.sleep(2 * (attempt + 1))
     raise RuntimeError(f"api failed: {params}: {last}")
 
 
@@ -125,19 +142,27 @@ def main() -> None:
     total = sum(len(t) for _, t in topics)
     print(f"{total} articles across {len(topics)} topics")
 
-    if STAGING.exists():
-        shutil.rmtree(STAGING)
-    STAGING.mkdir(parents=True)
+    STAGING.mkdir(parents=True, exist_ok=True)
+    # resumable: anything already staged or in the vault is skipped
+    existing: set[str] = set()
+    for root in (STAGING, VAULT_WIKI):
+        if root.exists():
+            existing |= {p.stem for p in root.rglob("*.md")}
+    if existing:
+        print(f"resuming: {len(existing)} articles already fetched")
 
     written = 0
     lock_print = 0
 
     def handle(topic: str, batch: list[str]) -> int:
-        extracts = fetch_extracts(batch)
+        todo = [t for t in batch if slugify(t) not in existing]
+        if not todo:
+            return 0
+        extracts = fetch_extracts(todo)
         topic_dir = STAGING / topic
         topic_dir.mkdir(parents=True, exist_ok=True)
         n = 0
-        for title in batch:
+        for title in todo:
             if write_article(topic_dir, title, extracts.get(title, "")):
                 n += 1
         return n
@@ -147,7 +172,7 @@ def main() -> None:
         for i in range(0, len(titles), 20):
             jobs.append((topic, titles[i : i + 20]))
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [pool.submit(handle, topic, batch) for topic, batch in jobs]
         for i, fut in enumerate(futures):
             written += fut.result()

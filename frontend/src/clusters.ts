@@ -76,6 +76,9 @@ export function computeClusters(
 
 // -- naming -----------------------------------------------------------------------
 
+// source markers, not topics — never name a region after these
+const GENERIC_TAGS = new Set(['wikipedia'])
+
 function titleCase(s: string): string {
   if (s.length <= 3) return s.toUpperCase() // acronym tags: ml -> ML
   return s.replace(/[-_]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
@@ -92,7 +95,9 @@ function labelFor(
   const counts = new Map<string, number>()
   for (const m of members) {
     for (const t of m.tags) {
-      if (!exclude?.has(t)) counts.set(t, (counts.get(t) ?? 0) + 1)
+      if (!GENERIC_TAGS.has(t) && !exclude?.has(t)) {
+        counts.set(t, (counts.get(t) ?? 0) + 1)
+      }
     }
   }
   let best: string | null = null
@@ -124,7 +129,9 @@ function centralTitle(members: WorldItem[], center: THREE.Vector3): string {
 function dominantTag(items: WorldItem[]): string | null {
   const counts = new Map<string, number>()
   for (const item of items) {
-    for (const tag of item.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1)
+    for (const tag of item.tags) {
+      if (!GENERIC_TAGS.has(tag)) counts.set(tag, (counts.get(tag) ?? 0) + 1)
+    }
   }
   let best: string | null = null
   let bestCount = 1

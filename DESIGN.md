@@ -134,6 +134,12 @@ Then broaden.
 - Navigation: search→fly, ride-the-arcs (click an arc to travel it), saved
   views (bookmarks, localStorage). Minimap still to come.
 
+- Wikipedia phase 1 (2026-06-12): ~9k Vital Articles (level 4) imported as a
+  `wiki/` source via scripts/fetch_wikipedia_vital.py, with topic tags driving
+  continents. Scale prep: batched embedding outside the lock, normalised
+  settle forces, lazy card pool, binned terrain sampling. Phase 2 (100k+:
+  ANN index, tile streaming, backend hierarchy) is designed but not built.
+
 ## Post-v1 (explicitly deferred)
 - LLM region summaries (cluster prose, auto place-names beyond simple labels)
 - Query → librarian: conversational LLM that flies the camera to clusters and

@@ -136,23 +136,28 @@ def settle(
     pos: np.ndarray,
     vecs: np.ndarray,
     pinned_mask: np.ndarray | None = None,
-    steps: int = 150,
+    steps: int | None = None,
     attract: float = 0.3,
     sim_floor: float = 0.30,
-    repel: float = 0.004,
+    repel_total: float = 0.3,
     max_step: float = 0.04,
 ) -> np.ndarray:
     """Force relaxation on the sphere. Attraction acts only on kNN pairs whose
     cosine similarity clears sim_floor (raw cosines are always positive, so
     without the floor the whole world collapses into one clump). Inverse-square
-    repulsion spreads clusters over the sphere and doubles as collision
-    avoidance — exact for small worlds, sampled (with rescaling) for big ones."""
+    repulsion spreads clusters and prevents overlap; it is normalised to a
+    constant TOTAL per item (repel_total) regardless of world size — an
+    unnormalised sum grows with the pair count and at ~10k items overwhelms
+    the attraction, grinding the semantic layout into a uniform spread."""
     n = len(pos)
     pos = _normalize(np.asarray(pos, dtype=np.float64))
     if n < 3:
         return pos
     if pinned_mask is None:
         pinned_mask = np.zeros(n, dtype=bool)
+    if steps is None:
+        # big worlds start from a good UMAP projection: settle gently
+        steps = 150 if n <= 2500 else 60
 
     k = min(6, n - 1)
     nbr, nbr_w = _knn(vecs, k, sim_floor)
@@ -168,7 +173,7 @@ def settle(
             np.fill_diagonal(dist, 1e9)
             force += ((diff / dist[..., None]) / (dist**2 + 1e-4)[..., None]).sum(
                 axis=1
-            ) * repel
+            ) * (repel_total / n)
         else:
             m = min(384, n - 1)
             sample = rng.choice(n, m, replace=False)
@@ -177,7 +182,7 @@ def settle(
             dist[dist < 1e-9] = 1e9  # self-pairs in the sample
             force += ((diff / dist[..., None]) / (dist**2 + 1e-4)[..., None]).sum(
                 axis=1
-            ) * (repel * n / m)
+            ) * (repel_total / m)
         # clamp per-item displacement for stability
         mag = np.linalg.norm(force, axis=1, keepdims=True)
         force *= np.minimum(1.0, max_step / np.maximum(mag, 1e-12))
