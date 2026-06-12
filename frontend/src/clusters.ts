@@ -185,8 +185,16 @@ export function makeClusterSprite(cluster: Cluster, elevation: number): THREE.Sp
   const texture = new THREE.CanvasTexture(canvas)
   texture.colorSpace = THREE.SRGBColorSpace
   texture.anisotropy = 4
-  const material = new THREE.SpriteMaterial({ map: texture, transparent: true })
+  // no depth test: the quad would slice into the terrain at the horizon.
+  // far-side labels are culled manually each frame instead (applyLod).
+  const material = new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+  })
   const sprite = new THREE.Sprite(material)
+  sprite.renderOrder = 20
   const w = 0.3 + Math.log2(cluster.items.length + 1) * 0.045
   sprite.scale.set(w, w * (canvas.height / canvas.width), 1)
   sprite.position

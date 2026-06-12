@@ -175,7 +175,12 @@ export function makeCard(item: WorldItem, elevation = 0): THREE.Sprite {
     }
     img.src = fileUrl(item.id)
   }
-  const material = new THREE.SpriteMaterial({ map: texture, transparent: true })
+  const material = new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    depthWrite: false, // transparent margins must not clip neighbours
+    alphaTest: 0.04,
+  })
   const sprite = new THREE.Sprite(material)
   sprite.center.set(0.5, 0) // anchor at the notch tip; the flag rises upward
   sprite.scale.set(CARD_W, CARD_H, 1)

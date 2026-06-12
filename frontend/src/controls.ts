@@ -65,7 +65,7 @@ export class GlobeControls {
     toTilt: number
   } | null = null
 
-  /** When set, a truthy return claims the left-button gesture (e.g. card drag). */
+  /** When set, a truthy return claims the gesture (context menus, move mode). */
   ignorePointer?: (e: PointerEvent) => boolean
 
   constructor(
@@ -88,7 +88,7 @@ export class GlobeControls {
   }
 
   private onDown = (e: PointerEvent): void => {
-    if (e.button === 0 && this.ignorePointer?.(e)) return
+    if (this.ignorePointer?.(e)) return
     this.anim = null
     if (e.button === 0) this.mode = 'pan'
     else if (e.button === 1 || e.button === 2) {

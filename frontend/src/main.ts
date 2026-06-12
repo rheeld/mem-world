@@ -273,59 +273,118 @@ function raycastAt(clientX: number, clientY: number): Hit | null {
   return null
 }
 
-// -- card dragging (local freeform) -------------------------------------------
+// -- card context menu + move mode ----------------------------------------------
+// moving is deliberate: right-click a card -> "move" -> the card follows the
+// cursor -> click to place (esc cancels). plain left-drag only pans the globe.
 
-let draggingCard: THREE.Sprite | null = null
+let movingCard: THREE.Sprite | null = null
+let moveOrigin: THREE.Vector3 | null = null
+const ctxmenu = document.getElementById('ctxmenu') as HTMLUListElement
+
+function closeCardMenu(): void {
+  ctxmenu.hidden = true
+}
+
+function openCardMenu(sprite: THREE.Sprite, x: number, y: number): void {
+  const item = sprite.userData.item as WorldItem
+  ctxmenu.innerHTML = `
+    <li class="ctx-title">${item.title.length > 26 ? item.title.slice(0, 25) + '…' : item.title}</li>
+    <li data-act="open">open</li>
+    <li data-act="move">move…</li>
+    <li data-act="pin">${item.pinned ? 'unpin' : 'pin in place'}</li>`
+  ctxmenu.style.left = `${Math.min(x, innerWidth - 180)}px`
+  ctxmenu.style.top = `${Math.min(y, innerHeight - 150)}px`
+  ctxmenu.hidden = false
+  ctxmenu.querySelector('[data-act="open"]')!.addEventListener('click', () => {
+    closeCardMenu()
+    void select(item.id)
+  })
+  ctxmenu.querySelector('[data-act="move"]')!.addEventListener('click', () => {
+    closeCardMenu()
+    movingCard = sprite
+    moveOrigin = (sprite.userData.normal as THREE.Vector3).clone()
+    renderer.domElement.style.cursor = 'move'
+    ui.setStatus(`moving “${item.title}” — click to place, esc to cancel`)
+  })
+  ctxmenu.querySelector('[data-act="pin"]')!.addEventListener('click', async () => {
+    closeCardMenu()
+    try {
+      await setPosition(item.id, item.pos, !item.pinned)
+      await refresh(true)
+      ui.setStatus(item.pinned ? `unpinned “${item.title}”` : `pinned “${item.title}”`)
+    } catch {
+      ui.setStatus('failed to update pin')
+    }
+  })
+}
+
+document.addEventListener('click', (e) => {
+  if (!(e.target instanceof Node) || !ctxmenu.contains(e.target)) closeCardMenu()
+})
 
 controls.ignorePointer = (e) => {
-  if (!cards.visible) return false
-  const hit = raycastAt(e.clientX, e.clientY)
-  if (hit?.card && hit.object instanceof THREE.Sprite) {
-    draggingCard = hit.object
-    return true
+  if (movingCard) return true // placement click must not pan/tilt
+  if (e.button === 2 && cards.visible) {
+    const hit = raycastAt(e.clientX, e.clientY)
+    if (hit?.card && hit.object instanceof THREE.Sprite) {
+      openCardMenu(hit.object, e.clientX, e.clientY)
+      return true
+    }
   }
   return false
 }
 
 renderer.domElement.addEventListener('pointerdown', (e) => {
   downAt = [e.clientX, e.clientY]
+  if (e.button === 0) closeCardMenu()
 })
 
-window.addEventListener('pointermove', (e) => {
-  if (!draggingCard || !(e.buttons & 1)) return
-  pointer.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1)
-  raycaster.setFromCamera(pointer, camera)
-  const hit = raycaster.intersectObject(globe.land, false)[0]
-  if (!hit) return
-  const p = hit.point.clone().normalize()
-  draggingCard.userData.normal = p
-  draggingCard.userData.glideTo = undefined
-  draggingCard.position.copy(p).multiplyScalar(cardAltitude(p))
-  renderer.domElement.style.cursor = 'grabbing'
-})
-
-window.addEventListener('pointerup', async (e) => {
-  if (!draggingCard) return
-  const mesh = draggingCard
-  draggingCard = null
+function cancelMove(): void {
+  if (!movingCard || !moveOrigin) return
+  movingCard.userData.normal = moveOrigin
+  movingCard.position.copy(moveOrigin).multiplyScalar(cardAltitude(moveOrigin))
+  movingCard = null
+  moveOrigin = null
   renderer.domElement.style.cursor = 'grab'
-  const moved = downAt && Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 6
-  if (!moved) return
-  const item = mesh.userData.item as WorldItem
-  const p = mesh.userData.normal as THREE.Vector3
+  ui.setStatus('move cancelled')
+}
+
+document.addEventListener(
+  'keydown',
+  (e) => {
+    if (e.key === 'Escape' && movingCard) {
+      cancelMove()
+      e.stopImmediatePropagation() // keep the panel open
+    }
+  },
+  true,
+)
+
+async function placeMovingCard(): Promise<void> {
+  if (!movingCard) return
+  const sprite = movingCard
+  movingCard = null
+  moveOrigin = null
+  renderer.domElement.style.cursor = 'grab'
+  const item = sprite.userData.item as WorldItem
+  const p = sprite.userData.normal as THREE.Vector3
   lastPositions.set(item.id, p.clone())
   try {
     await setPosition(item.id, [p.x, p.y, p.z], true)
-    ui.setStatus(`pinned “${item.title}” here`)
     await refresh(true)
+    ui.setStatus(`pinned “${item.title}” here`)
   } catch {
     ui.setStatus('failed to move item')
   }
-})
+}
 
 // -- clicks --------------------------------------------------------------------
 
 renderer.domElement.addEventListener('click', (e) => {
+  if (movingCard) {
+    void placeMovingCard()
+    return
+  }
   if (downAt && Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 6) return
   const hit = raycastAt(e.clientX, e.clientY)
   if (hit?.card) {
@@ -365,6 +424,19 @@ function applyHover(obj: THREE.Object3D): void {
 }
 
 renderer.domElement.addEventListener('pointermove', (e) => {
+  if (movingCard) {
+    // move mode: the card follows the cursor across the terrain
+    pointer.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1)
+    raycaster.setFromCamera(pointer, camera)
+    const hit = raycaster.intersectObject(globe.land, false)[0]
+    if (hit) {
+      const p = hit.point.clone().normalize()
+      movingCard.userData.normal = p
+      movingCard.userData.glideTo = undefined
+      movingCard.position.copy(p).multiplyScalar(cardAltitude(p))
+    }
+    return
+  }
   if (e.buttons !== 0) return
   const hit = raycastAt(e.clientX, e.clientY)
   const target = hit?.card || hit?.cluster || hit?.arc ? (hit.object ?? null) : null
@@ -532,8 +604,15 @@ function applyLod(): void {
   for (const child of cards.children) {
     ;(child as THREE.Sprite).material.opacity = cardOpacity
   }
+  // labels skip the depth test (terrain would slice them at the horizon),
+  // so hide the ones past the limb by hand
+  const camDir = camera.position.clone().normalize()
+  const horizon = 1 / Math.max(camera.position.length(), 1.0001)
   for (const child of labels.children) {
-    ;(child as THREE.Sprite).material.opacity = labelOpacity
+    const sprite = child as THREE.Sprite
+    sprite.material.opacity = labelOpacity
+    const center = (sprite.userData.cluster as Cluster).center
+    sprite.visible = center.dot(camDir) > horizon - 0.03
   }
 }
 

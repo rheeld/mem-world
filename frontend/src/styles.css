@@ -202,6 +202,46 @@ body {
   z-index: 10;
 }
 
+/* ---- card context menu ---- */
+
+#ctxmenu {
+  position: fixed;
+  min-width: 160px;
+  list-style: none;
+  padding: 6px;
+  margin: 0;
+  background: #fbf5e4;
+  border: 1.5px solid #8a7350;
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+  z-index: 30;
+}
+
+#ctxmenu li {
+  padding: 7px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  color: #4a3b28;
+}
+
+#ctxmenu li:hover {
+  background: #efe3c2;
+}
+
+#ctxmenu .ctx-title {
+  font-size: 12px;
+  font-style: italic;
+  color: #99876a;
+  border-bottom: 1px solid #d9caa3;
+  border-radius: 6px 6px 0 0;
+  cursor: default;
+}
+
+#ctxmenu .ctx-title:hover {
+  background: none;
+}
+
 /* ---- side panel ---- */
 
 #panel {
