@@ -213,8 +213,12 @@ class World:
                 for idx, r in enumerate(rows)
                 if r["pinned"] and r["x"] is not None
             }
-            pos = layout.full_layout(vecs, pinned=pinned)
+            pos, weights = layout.full_layout(vecs, pinned=pinned)
             for idx, item_id in enumerate(ids):
+                self.db.execute(
+                    "UPDATE items SET weight=? WHERE id=?",
+                    (float(weights[idx]), item_id),
+                )
                 if idx in pinned:
                     continue
                 self._write_position(item_id, pos[idx])
@@ -255,6 +259,7 @@ class World:
             "title": r["title"],
             "tags": json.loads(r["tags"]),
             "pos": [r["x"], r["y"], r["z"]],
+            "weight": r["weight"],
             "pinned": bool(r["pinned"]),
         }
 

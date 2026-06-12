@@ -20,17 +20,20 @@ def full_layout(
     vecs: np.ndarray,
     pinned: dict[int, np.ndarray] | None = None,
     seed: int = 42,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     """Map (n, dim) unit embeddings to (n, 3) unit vectors on the sphere.
 
     pinned maps row index -> fixed position; pinned rows are never moved.
+    Returns (positions, weights): weights capture each item's PRE-declutter
+    neighbourhood density — the declutter equalises spacing, which would
+    flatten the terrain, so peaks are driven by the original crowding.
     """
     n = len(vecs)
     pinned = pinned or {}
     if n == 0:
-        return np.zeros((0, 3), dtype=np.float64)
+        return np.zeros((0, 3), dtype=np.float64), np.zeros(0)
     if n == 1:
-        return _normalize(np.array([[0.3, 0.45, 0.85]]))
+        return _normalize(np.array([[0.3, 0.45, 0.85]])), np.ones(1)
 
     pos = None
     from_umap = False
@@ -45,13 +48,30 @@ def full_layout(
         pos[i] = _normalize(np.asarray(p, dtype=np.float64))
         pinned_mask[i] = True
 
+    weights = _density_weights(pos)
+
     # UMAP's projection is used as-is: the settle pass (esp. its repulsion)
     # was smearing the global structure. A collision-only declutter enforces
     # the minimum spacing that keeps note cards non-overlapping at full zoom —
     # purely local nudges, no long-range force, so the geography survives.
     if from_umap:
-        return _declutter(pos, pinned_mask, _min_separation(n))
-    return settle(pos, vecs, pinned_mask)
+        return _declutter(pos, pinned_mask, _min_separation(n)), weights
+    return settle(pos, vecs, pinned_mask), weights
+
+
+def _density_weights(pos: np.ndarray, radius: float = 0.08) -> np.ndarray:
+    """Neighbour counts within `radius` of each PRE-declutter position,
+    normalised so the terrain's mean stays put but peaks rise where the
+    projection was crowded."""
+    n = len(pos)
+    if n < 20:
+        return np.ones(n)
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(pos)
+    counts = np.asarray(tree.query_ball_point(pos, radius, return_length=True), dtype=np.float64)
+    p90 = max(float(np.percentile(counts, 90)), 1.0)
+    return np.clip(0.5 + 2.5 * counts / p90, 0.5, 4.0)
 
 
 def _min_separation(n: int) -> float:

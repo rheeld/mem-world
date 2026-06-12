@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS items (
   created_at REAL NOT NULL,
   modified_at REAL NOT NULL,
   x REAL, y REAL, z REAL,
+  weight REAL NOT NULL DEFAULT 1,
   pinned INTEGER NOT NULL DEFAULT 0
 );
 
@@ -44,6 +45,11 @@ def connect(path: Path) -> sqlite3.Connection:
     db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA foreign_keys=ON")
     db.executescript(SCHEMA)
+    # migrations for existing databases
+    try:
+        db.execute("ALTER TABLE items ADD COLUMN weight REAL NOT NULL DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     db.commit()
     return db
 

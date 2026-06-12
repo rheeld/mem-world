@@ -7,6 +7,7 @@ export interface WorldItem {
   title: string
   tags: string[]
   pos: [number, number, number]
+  weight?: number // pre-declutter neighbourhood density; drives terrain height
   pinned: boolean
   distance?: number | null
 }

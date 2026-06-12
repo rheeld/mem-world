@@ -76,7 +76,9 @@ const GROUP_PALETTE = [
 ]
 
 const app = document.getElementById('app')!
-const renderer = new THREE.WebGLRenderer({ antialias: true })
+// logarithmic depth: the density-scaled min zoom shrinks camera.near, and a
+// plain depth buffer then z-fights where seabed meets water (panning shimmer)
+const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true })
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
 renderer.setSize(innerWidth, innerHeight)
 renderer.localClippingEnabled = true

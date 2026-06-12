@@ -97,11 +97,13 @@ export class Globe {
   private fieldX = new Float32Array(0)
   private fieldY = new Float32Array(0)
   private fieldZ = new Float32Array(0)
+  private fieldW = new Float32Array(0) // pre-declutter density weights
   private bins: number[][] = []
 
   constructor() {
+    // fractionally below sea level so shoreline facets never z-fight the water
     const water = new THREE.Mesh(
-      new THREE.IcosahedronGeometry(1, 12),
+      new THREE.IcosahedronGeometry(0.9995, 12),
       new THREE.MeshStandardMaterial({
         color: '#3d7ab5',
         flatShading: true,
@@ -135,12 +137,14 @@ export class Globe {
     this.fieldX = new Float32Array(n)
     this.fieldY = new Float32Array(n)
     this.fieldZ = new Float32Array(n)
+    this.fieldW = new Float32Array(n)
     this.bins = Array.from({ length: BIN_COUNT }, () => [])
     for (let i = 0; i < n; i++) {
       const [x, y, z] = sampled[i].pos
       this.fieldX[i] = x
       this.fieldY[i] = y
       this.fieldZ[i] = z
+      this.fieldW[i] = sampled[i].weight ?? 1
       this.bins[binIndex(x, y, z)].push(i)
     }
   }
@@ -153,7 +157,7 @@ export class Globe {
         const dot = x * this.fieldX[i] + y * this.fieldY[i] + z * this.fieldZ[i]
         if (dot < COS_CUTOFF) continue
         const ang = Math.acos(dot > 1 ? 1 : dot)
-        d += Math.exp(-ang * ang * inv)
+        d += this.fieldW[i] * Math.exp(-ang * ang * inv)
       }
     }
     return d
