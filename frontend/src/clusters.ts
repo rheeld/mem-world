@@ -137,7 +137,10 @@ function dominantTag(items: WorldItem[]): string | null {
   return best
 }
 
-/** Two regions named "Art" reads as a bug — qualify duplicates. */
+/** If several siblings claim the same label, that name distinguishes nothing:
+ * ALL of them fall back to their most central item's title (no "Tag · X"
+ * composites — those read as broken hierarchy). The only exception is a label
+ * honestly inherited from an identical parent, which is kept. */
 function disambiguate(clusters: Cluster[]): void {
   const byLabel = new Map<string, Cluster[]>()
   for (const c of clusters) {
@@ -145,14 +148,12 @@ function disambiguate(clusters: Cluster[]): void {
     if (!g) byLabel.set(c.label, (g = []))
     g.push(c)
   }
-  for (const [label, group] of byLabel) {
+  for (const group of byLabel.values()) {
     if (group.length < 2) continue
-    const seen = new Set<string>()
     for (const c of group) {
-      if (seen.has(c.label)) {
-        c.label = `${label} · ${centralTitle(c.items, c.center)}`
-      }
-      seen.add(c.label)
+      if (c.parent && c.parent.label === c.label) continue
+      c.label = centralTitle(c.items, c.center)
+      c.labelTag = undefined
     }
   }
 }
