@@ -5,6 +5,97 @@ export interface Cluster {
   center: THREE.Vector3
   items: WorldItem[]
   label: string
+  /** label before parent-prefix stripping (hierarchy levels use this) */
+  origLabel?: string
+}
+
+function dominantTag(items: WorldItem[]): string | null {
+  const counts = new Map<string, number>()
+  for (const item of items) {
+    for (const tag of item.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1)
+  }
+  let best: string | null = null
+  let bestCount = 1 // a tag must appear at least twice to define a region
+  for (const [tag, count] of counts) {
+    if (count > bestCount) {
+      best = tag
+      bestCount = count
+    }
+  }
+  return best
+}
+
+/** Top LOD level: merge child regions that share a dominant tag into one
+ * continent ("ART"), regardless of how far the topic sprawls — pure geometric
+ * merging splits big domains. Untagged children join the nearest continent. */
+export function computeSuperClusters(children: Cluster[]): Cluster[] {
+  const byTag = new Map<string, Cluster[]>()
+  const untagged: Cluster[] = []
+  for (const child of children) {
+    const tag = dominantTag(child.items)
+    if (tag) {
+      let group = byTag.get(tag)
+      if (!group) byTag.set(tag, (group = []))
+      group.push(child)
+    } else {
+      untagged.push(child)
+    }
+  }
+  const fromGroup = (label: string, group: Cluster[]): Cluster => {
+    const items = group.flatMap((c) => c.items)
+    const center = group
+      .reduce(
+        (acc, c) => acc.addScaledVector(c.center, c.items.length),
+        new THREE.Vector3(),
+      )
+      .normalize()
+    return { center, items, label }
+  }
+  const supers = [...byTag.entries()].map(([tag, group]) =>
+    fromGroup(titleCase(tag), group),
+  )
+  for (const child of untagged) {
+    let best: Cluster | null = null
+    let bestAngle = 0.85
+    for (const s of supers) {
+      const a = s.center.angleTo(child.center)
+      if (a < bestAngle) {
+        bestAngle = a
+        best = s
+      }
+    }
+    if (best) {
+      best.items = best.items.concat(child.items)
+    } else {
+      supers.push({ center: child.center.clone(), items: child.items, label: child.label })
+    }
+  }
+  disambiguate(supers)
+  return supers
+}
+
+/** Children whose label repeats their parent region's name shed the prefix:
+ * "ART · Artist" under "ART" becomes just "Artist". */
+export function stripParentPrefixes(children: Cluster[], parents: Cluster[]): void {
+  for (const child of children) {
+    let parent: Cluster | null = null
+    let best = Infinity
+    for (const p of parents) {
+      const a = p.center.angleTo(child.center)
+      if (a < best) {
+        best = a
+        parent = p
+      }
+    }
+    if (!parent) continue
+    for (const prefix of [parent.label, parent.origLabel ?? parent.label]) {
+      if (prefix && child.label.startsWith(`${prefix} · `)) {
+        child.origLabel = child.label
+        child.label = child.label.slice(prefix.length + 3)
+        break
+      }
+    }
+  }
 }
 
 /** Leader clustering on geodesic distance: items join the nearest cluster
@@ -144,7 +235,11 @@ function labelFor(members: WorldItem[], center: THREE.Vector3): string {
   return title.length > 24 ? title.slice(0, 23).trimEnd() + '…' : title
 }
 
-export function makeClusterSprite(cluster: Cluster, elevation: number): THREE.Sprite {
+export function makeClusterSprite(
+  cluster: Cluster,
+  elevation: number,
+  sizeMul = 1,
+): THREE.Sprite {
   const canvas = document.createElement('canvas')
   canvas.width = 720
   canvas.height = 200
@@ -195,7 +290,7 @@ export function makeClusterSprite(cluster: Cluster, elevation: number): THREE.Sp
   })
   const sprite = new THREE.Sprite(material)
   sprite.renderOrder = 20
-  const w = 0.3 + Math.log2(cluster.items.length + 1) * 0.045
+  const w = (0.3 + Math.log2(cluster.items.length + 1) * 0.045) * sizeMul
   sprite.scale.set(w, w * (canvas.height / canvas.width), 1)
   sprite.position
     .copy(cluster.center)

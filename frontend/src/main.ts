@@ -12,7 +12,14 @@ import {
   type WorldState,
 } from './api'
 import { CARD_ANCHOR_ALTITUDE, disposeCard, makeCard } from './cards'
-import { computeClusters, disposeSprite, makeClusterSprite, type Cluster } from './clusters'
+import {
+  computeClusters,
+  computeSuperClusters,
+  disposeSprite,
+  makeClusterSprite,
+  stripParentPrefixes,
+  type Cluster,
+} from './clusters'
 import { GlobeControls } from './controls'
 import { Globe } from './globe'
 import { Minimap } from './minimap'
@@ -20,9 +27,22 @@ import { addLights, makeAtmosphere, makeStars } from './scene'
 import { UI } from './ui'
 import './styles.css'
 
-// LOD bands (camera distance): cards near, cluster labels far
-const CARDS_FADE = [0.7, 1.5] as const
-const LABELS_FADE = [0.9, 1.7] as const
+// LOD hierarchy (camera distance): super-regions far, regions mid, fine
+// clusters near, then cards. add levels here as the world densifies.
+interface LabelLevel {
+  radius: number // leader-clustering radius (radians)
+  fadeIn: [number, number]
+  fadeOut: [number, number] | null
+  size: number // sprite scale multiplier
+  flyDistance: number // clicking a label descends to this zoom
+}
+
+const LABEL_LEVELS: LabelLevel[] = [
+  { radius: 0.95, fadeIn: [1.85, 2.3], fadeOut: null, size: 1.45, flyDistance: 1.5 },
+  { radius: 0.6, fadeIn: [1.0, 1.25], fadeOut: [1.9, 2.4], size: 1.0, flyDistance: 0.95 },
+  { radius: 0.33, fadeIn: [0.62, 0.8], fadeOut: [1.05, 1.3], size: 0.74, flyDistance: 0.5 },
+]
+const CARDS_FADE = [0.6, 1.0] as const
 const ARC_COLOR = '#ff8a5c'
 const ARC_HOVER = '#ffd27a'
 
@@ -50,8 +70,11 @@ const globe = new Globe()
 scene.add(globe.group)
 const cards = new THREE.Group()
 scene.add(cards)
-const labels = new THREE.Group()
-scene.add(labels)
+const labelGroups: THREE.Group[] = LABEL_LEVELS.map(() => {
+  const group = new THREE.Group()
+  scene.add(group)
+  return group
+})
 const arcs = new THREE.Group()
 scene.add(arcs)
 
@@ -60,7 +83,8 @@ const controls = new GlobeControls(camera, renderer.domElement, (dir) =>
 )
 
 let world: WorldState | null = null
-let clusters: Cluster[] = []
+let levelClusters: Cluster[][] = LABEL_LEVELS.map(() => [])
+let clusters: Cluster[] = [] // mid level — bookmarks/status/minimap granularity
 let selectedId: number | null = null
 let hovered: THREE.Object3D | null = null
 // cards glide between layout positions instead of teleporting
@@ -169,26 +193,43 @@ function rebuild(): void {
   for (const id of [...lastPositions.keys()]) {
     if (!world.items.some((i) => i.id === id)) lastPositions.delete(id)
   }
-  for (const child of [...labels.children]) {
-    labels.remove(child)
-    disposeSprite(child as THREE.Sprite)
-  }
-  clusters = computeClusters(world.items)
-  for (const cluster of clusters) {
-    const sprite = makeClusterSprite(cluster, globe.elevation(cluster.center))
-    sprite.material.clippingPlanes = [horizonPlane]
-    labels.add(sprite)
-  }
-  minimap.setWorld(
-    world.items,
-    clusters.map((c) => ({ center: c.center, label: c.label, count: c.items.length })),
+  // mid + fine levels are geometric; the top level is semantic (by tag)
+  levelClusters = LABEL_LEVELS.map((level, li) =>
+    li === 0 ? [] : computeClusters(world!.items, level.radius),
   )
+  levelClusters[0] = computeSuperClusters(levelClusters[1])
+  for (let li = 1; li < levelClusters.length; li++) {
+    stripParentPrefixes(levelClusters[li], levelClusters[li - 1])
+  }
+  clusters = levelClusters[1] ?? levelClusters[0]
+  labelGroups.forEach((group, li) => {
+    for (const child of [...group.children]) {
+      group.remove(child)
+      disposeSprite(child as THREE.Sprite)
+    }
+    for (const cluster of levelClusters[li]) {
+      const sprite = makeClusterSprite(
+        cluster,
+        globe.elevation(cluster.center),
+        LABEL_LEVELS[li].size,
+      )
+      sprite.material.clippingPlanes = [horizonPlane]
+      sprite.userData.level = li
+      group.add(sprite)
+    }
+  })
+  const mini = (cs: Cluster[]) =>
+    cs.map((c) => ({ center: c.center, label: c.label, count: c.items.length }))
+  minimap.setWorld(world.items, {
+    coarse: mini(levelClusters[0]),
+    fine: mini(clusters),
+  })
   if (!sidebar.hidden) renderSidebar()
   drawArcs()
   ui.setStatus(
     world.items.length === 0
       ? 'open ocean — drop a file in, or double-click to write'
-      : `${world.items.length} items · ${clusters.length} regions`,
+      : `${world.items.length} items · ${levelClusters[0].length} continents · ${clusters.length} regions`,
   )
 }
 
@@ -265,8 +306,9 @@ interface Hit {
 function raycastAt(clientX: number, clientY: number): Hit | null {
   pointer.set((clientX / innerWidth) * 2 - 1, -(clientY / innerHeight) * 2 + 1)
   raycaster.setFromCamera(pointer, camera)
-  if (labels.visible) {
-    const labelHit = raycaster.intersectObjects(labels.children, false)[0]
+  for (const group of labelGroups) {
+    if (!group.visible) continue
+    const labelHit = raycaster.intersectObjects(group.children, false)[0]
     if (labelHit) {
       return { cluster: labelHit.object.userData.cluster as Cluster, object: labelHit.object }
     }
@@ -403,8 +445,12 @@ renderer.domElement.addEventListener('click', (e) => {
   if (hit?.card) {
     void select(hit.card.id)
   } else if (hit?.cluster) {
-    controls.flyTo(hit.cluster.center, { distance: 0.75, tilt: 0.45 })
-    ui.showRegion({ label: hit.cluster.label, items: hit.cluster.items })
+    // descend exactly one LOD level toward the clicked region
+    const level = LABEL_LEVELS[(hit.object?.userData.level as number) ?? 1]
+    controls.flyTo(hit.cluster.center, { distance: level.flyDistance, tilt: 0.45 })
+    if (level === LABEL_LEVELS[LABEL_LEVELS.length - 1]) {
+      ui.showRegion({ label: hit.cluster.label, items: hit.cluster.items })
+    }
   } else if (hit?.arc) {
     const [a, b] = hit.arc.userData.ends as [WorldItem, WorldItem]
     const far = selectedId === a.id ? b : a
@@ -608,12 +654,17 @@ function smoothstep(x: number, lo: number, hi: number): number {
   return t * t * (3 - 2 * t)
 }
 
+/** Opacity of an LOD band at camera distance d. */
+function bandOpacity(d: number, level: LabelLevel): number {
+  let o = smoothstep(d, level.fadeIn[0], level.fadeIn[1])
+  if (level.fadeOut) o *= 1 - smoothstep(d, level.fadeOut[0], level.fadeOut[1])
+  return o
+}
+
 function applyLod(): void {
   const d = controls.viewDistance
   const cardOpacity = 1 - smoothstep(d, CARDS_FADE[0], CARDS_FADE[1])
-  const labelOpacity = smoothstep(d, LABELS_FADE[0], LABELS_FADE[1])
   cards.visible = cardOpacity > 0.02
-  labels.visible = labelOpacity > 0.02
   // move the horizon clipping plane with the camera: fragments beyond the
   // limb are shaved off, so sprites rise smoothly over the curve
   const camDir = camera.position.clone().normalize()
@@ -627,12 +678,17 @@ function applyLod(): void {
     const n = sprite.userData.normal as THREE.Vector3
     sprite.visible = n.dot(camDir) > horizon - 0.08
   }
-  for (const child of labels.children) {
-    const sprite = child as THREE.Sprite
-    sprite.material.opacity = labelOpacity
-    const center = (sprite.userData.cluster as Cluster).center
-    sprite.visible = center.dot(camDir) > horizon - 0.12
-  }
+  labelGroups.forEach((group, li) => {
+    const opacity = bandOpacity(d, LABEL_LEVELS[li])
+    group.visible = opacity > 0.02
+    if (!group.visible) return
+    for (const child of group.children) {
+      const sprite = child as THREE.Sprite
+      sprite.material.opacity = opacity
+      const center = (sprite.userData.cluster as Cluster).center
+      sprite.visible = center.dot(camDir) > horizon - 0.12
+    }
+  })
 }
 
 // -- sidebar (vault file tree) ---------------------------------------------------

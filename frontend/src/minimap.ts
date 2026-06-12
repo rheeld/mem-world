@@ -30,11 +30,16 @@ function toMap(x: number, y: number, z: number): [number, number] {
 /** Bottom-left overview: the whole world flattened to an equirect map.
  * Scroll to zoom (region summaries when zoomed out, items when zoomed in);
  * click to centre that point on the globe. */
+export interface MiniClusterLevels {
+  coarse: MiniCluster[]
+  fine: MiniCluster[]
+}
+
 export class Minimap {
   private base = document.createElement('canvas')
   private ctx: CanvasRenderingContext2D
   private items: WorldItem[] = []
-  private clusters: MiniCluster[] = []
+  private clusters: MiniClusterLevels = { coarse: [], fine: [] }
   private zoom = 1
   private cx = W / 2
   private cy = H / 2
@@ -111,7 +116,7 @@ export class Minimap {
     return [mx, my]
   }
 
-  setWorld(items: WorldItem[], clusters: MiniCluster[]): void {
+  setWorld(items: WorldItem[], clusters: MiniClusterLevels): void {
     this.items = items
     this.clusters = clusters
     this.dirty = true
@@ -177,11 +182,13 @@ export class Minimap {
         }
       }
     } else {
-      // high-level summaries: region labels, biggest first, de-cluttered
+      // high-level summaries: region labels, biggest first, de-cluttered;
+      // continents while zoomed right out, regions once partly zoomed
       ctx.font = '600 10px Georgia, serif'
       ctx.textAlign = 'center'
       const taken: [number, number, number, number][] = []
-      const sorted = [...this.clusters].sort((a, b) => b.count - a.count)
+      const source = this.zoom < 1.45 ? this.clusters.coarse : this.clusters.fine
+      const sorted = [...source].sort((a, b) => b.count - a.count)
       for (const c of sorted) {
         const [mx, my] = toMap(c.center.x, c.center.y, c.center.z)
         const [x, y] = this.toCanvas(mx, my)
