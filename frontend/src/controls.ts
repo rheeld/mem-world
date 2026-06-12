@@ -125,16 +125,28 @@ export class GlobeControls {
     )
   }
 
-  /** True "grab the ground": one pixel of cursor = one pixel of ground. */
+  /** True "grab the ground": one pixel of cursor = one pixel of ground.
+   * The drag is a pure TRANSLATION of the target along the tangent plane —
+   * rotating around camera axes (the old approach) spins the view when
+   * looking straight down, which read as left-right shake. */
   private pan(dx: number, dy: number): void {
     const fov = THREE.MathUtils.degToRad(this.camera.fov)
     const k = (2 * this.distance * Math.tan(fov / 2)) / this.dom.clientHeight
+    const u = this.target.clone().normalize()
+    // camera screen axes projected onto the tangent plane at the target
     const right = new THREE.Vector3().setFromMatrixColumn(this.camera.matrix, 0)
-    const up = new THREE.Vector3().setFromMatrixColumn(this.camera.matrix, 1)
-    // signs verified empirically: the ground follows the cursor
-    const q = new THREE.Quaternion()
-      .setFromAxisAngle(up, -dx * k)
-      .multiply(new THREE.Quaternion().setFromAxisAngle(right, -dy * k))
+    right.addScaledVector(u, -right.dot(u))
+    const upScreen = new THREE.Vector3().setFromMatrixColumn(this.camera.matrix, 1)
+    upScreen.addScaledVector(u, -upScreen.dot(u))
+    if (right.lengthSq() < 1e-10 || upScreen.lengthSq() < 1e-10) return
+    right.normalize()
+    upScreen.normalize()
+    // ground follows the cursor: target moves opposite the drag
+    const move = right.multiplyScalar(-dx * k).addScaledVector(upScreen, dy * k)
+    const angle = move.length()
+    if (angle < 1e-9) return
+    const axis = new THREE.Vector3().crossVectors(u, move.divideScalar(angle))
+    const q = new THREE.Quaternion().setFromAxisAngle(axis.normalize(), angle)
     this.target.applyQuaternion(q).normalize()
     this.northRef.applyQuaternion(q).normalize() // carry the frame along
   }

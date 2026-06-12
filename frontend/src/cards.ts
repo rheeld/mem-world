@@ -1,11 +1,15 @@
 import * as THREE from 'three'
 import { fileUrl, type WorldItem } from './api'
 
+// world-space size of a card sprite; sprites are screen-aligned so they keep
+// this rectangle's proportions in the viewport at any camera angle
 const CARD_W = 0.1
 const CANVAS_W = 560
-const CANVAS_H = 372
+const CANVAS_H = 396
+const BODY_H = 372 // card body; the rest is the pin notch
 const CARD_H = CARD_W * (CANVAS_H / CANVAS_W)
 const MARGIN = 24 // transparent margin so the baked shadow isn't clipped
+export const CARD_ANCHOR_ALTITUDE = 0.004
 
 const KIND_COLOR: Record<string, string> = {
   note: '#7fa75e',
@@ -13,8 +17,6 @@ const KIND_COLOR: Record<string, string> = {
   image: '#5a7fb5',
 }
 const KIND_GLYPH: Record<string, string> = { note: '¶', pdf: '⎘', image: '✦' }
-
-const sharedGeometry = new THREE.PlaneGeometry(CARD_W, CARD_H)
 
 function wrapText(
   ctx: CanvasRenderingContext2D,
@@ -46,26 +48,32 @@ function wrapText(
   if (line) ctx.fillText(line, x, y)
 }
 
-function cardFrame(ctx: CanvasRenderingContext2D): void {
+/** Card body + the little pin notch pointing at the anchor. */
+function cardFrame(ctx: CanvasRenderingContext2D, fill: string): Path2D {
   const w = CANVAS_W - MARGIN * 2
-  const h = CANVAS_H - MARGIN * 2
+  const h = BODY_H - MARGIN * 2
   ctx.clearRect(0, 0, CANVAS_W, CANVAS_H)
+  const path = new Path2D()
+  path.roundRect(MARGIN, MARGIN, w, h, 18)
+  path.moveTo(CANVAS_W / 2 - 20, BODY_H - MARGIN - 2)
+  path.lineTo(CANVAS_W / 2, CANVAS_H - 4)
+  path.lineTo(CANVAS_W / 2 + 20, BODY_H - MARGIN - 2)
+  path.closePath()
   ctx.shadowColor = 'rgba(10, 14, 24, 0.4)'
   ctx.shadowBlur = 18
   ctx.shadowOffsetY = 10
-  ctx.fillStyle = '#faf3e0'
-  ctx.beginPath()
-  ctx.roundRect(MARGIN, MARGIN, w, h, 18)
-  ctx.fill()
+  ctx.fillStyle = fill
+  ctx.fill(path)
   ctx.shadowColor = 'transparent'
+  return path
 }
 
 function drawCard(ctx: CanvasRenderingContext2D, item: WorldItem): void {
   const w = CANVAS_W - MARGIN * 2
-  cardFrame(ctx)
+  const frame = cardFrame(ctx, '#faf3e0')
   ctx.strokeStyle = '#54442f'
   ctx.lineWidth = 4
-  ctx.stroke()
+  ctx.stroke(frame)
 
   // kind ribbon
   const kindColor = KIND_COLOR[item.kind] ?? '#8a7350'
@@ -96,7 +104,7 @@ function drawCard(ctx: CanvasRenderingContext2D, item: WorldItem): void {
   if (item.tags.length > 0) {
     ctx.font = 'italic 27px Georgia, serif'
     let x = MARGIN + 30
-    const y = CANVAS_H - MARGIN - 30
+    const y = BODY_H - MARGIN - 30
     for (const tag of item.tags.slice(0, 4)) {
       const label = `#${tag}`
       const tw = ctx.measureText(label).width
@@ -113,7 +121,7 @@ function drawCard(ctx: CanvasRenderingContext2D, item: WorldItem): void {
   if (item.pinned) {
     ctx.fillStyle = '#8a7350'
     ctx.font = '30px Georgia, serif'
-    ctx.fillText('⚲', CANVAS_W - MARGIN - 64, CANVAS_H - MARGIN - 28)
+    ctx.fillText('⚲', CANVAS_W - MARGIN - 64, BODY_H - MARGIN - 28)
   }
 }
 
@@ -124,35 +132,33 @@ function drawImageCard(
   item: WorldItem,
 ): void {
   const w = CANVAS_W - MARGIN * 2
-  const h = CANVAS_H - MARGIN * 2
-  cardFrame(ctx)
+  const h = BODY_H - MARGIN * 2
+  const frame = cardFrame(ctx, '#faf3e0')
   ctx.save()
   ctx.beginPath()
   ctx.roundRect(MARGIN + 8, MARGIN + 8, w - 16, h - 16, 12)
   ctx.clip()
-  // cover-fit the artwork
   const scale = Math.max((w - 16) / img.width, (h - 16) / img.height)
   const dw = img.width * scale
   const dh = img.height * scale
   ctx.drawImage(img, MARGIN + 8 + (w - 16 - dw) / 2, MARGIN + 8 + (h - 16 - dh) / 2, dw, dh)
-  // title band
-  const grad = ctx.createLinearGradient(0, CANVAS_H - MARGIN - 96, 0, CANVAS_H - MARGIN)
+  const grad = ctx.createLinearGradient(0, BODY_H - MARGIN - 96, 0, BODY_H - MARGIN)
   grad.addColorStop(0, 'rgba(20, 16, 10, 0)')
   grad.addColorStop(1, 'rgba(20, 16, 10, 0.78)')
   ctx.fillStyle = grad
-  ctx.fillRect(MARGIN + 8, CANVAS_H - MARGIN - 96, w - 16, 88)
+  ctx.fillRect(MARGIN + 8, BODY_H - MARGIN - 96, w - 16, 88)
   ctx.fillStyle = '#f5eed9'
   ctx.font = 'bold 34px Georgia, serif'
-  wrapText(ctx, item.title, MARGIN + 26, CANVAS_H - MARGIN - 34, w - 60, 38, 1)
+  wrapText(ctx, item.title, MARGIN + 26, BODY_H - MARGIN - 34, w - 60, 38, 1)
   ctx.restore()
   ctx.strokeStyle = '#54442f'
   ctx.lineWidth = 4
-  ctx.beginPath()
-  ctx.roundRect(MARGIN, MARGIN, w, h, 18)
-  ctx.stroke()
+  ctx.stroke(frame)
 }
 
-export function makeCard(item: WorldItem, elevation = 0): THREE.Mesh {
+/** Cards are sprites: always camera-facing, never perspective-skewed —
+ * a flag planted at its anchor point (sprite center sits at the notch tip). */
+export function makeCard(item: WorldItem, elevation = 0): THREE.Sprite {
   const canvas = document.createElement('canvas')
   canvas.width = CANVAS_W
   canvas.height = CANVAS_H
@@ -169,17 +175,18 @@ export function makeCard(item: WorldItem, elevation = 0): THREE.Mesh {
     }
     img.src = fileUrl(item.id)
   }
-  const material = new THREE.MeshBasicMaterial({ map: texture, transparent: true })
-  const mesh = new THREE.Mesh(sharedGeometry, material)
+  const material = new THREE.SpriteMaterial({ map: texture, transparent: true })
+  const sprite = new THREE.Sprite(material)
+  sprite.center.set(0.5, 0) // anchor at the notch tip; the flag rises upward
+  sprite.scale.set(CARD_W, CARD_H, 1)
   const p = new THREE.Vector3(...item.pos).normalize()
-  mesh.position.copy(p).multiplyScalar(1 + Math.max(0, elevation) + 0.016)
-  mesh.userData.item = item
-  mesh.userData.normal = p // cards are re-oriented every frame to stay readable
-  return mesh
+  sprite.position.copy(p).multiplyScalar(1 + Math.max(0, elevation) + CARD_ANCHOR_ALTITUDE)
+  sprite.userData.item = item
+  sprite.userData.normal = p
+  return sprite
 }
 
-export function disposeCard(mesh: THREE.Mesh): void {
-  const material = mesh.material as THREE.MeshBasicMaterial
-  material.map?.dispose()
-  material.dispose()
+export function disposeCard(sprite: THREE.Sprite): void {
+  sprite.material.map?.dispose()
+  sprite.material.dispose()
 }

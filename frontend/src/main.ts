@@ -11,10 +11,11 @@ import {
   type WorldItem,
   type WorldState,
 } from './api'
-import { disposeCard, makeCard } from './cards'
+import { CARD_ANCHOR_ALTITUDE, disposeCard, makeCard } from './cards'
 import { computeClusters, disposeSprite, makeClusterSprite, type Cluster } from './clusters'
 import { GlobeControls } from './controls'
 import { Globe } from './globe'
+import { Minimap } from './minimap'
 import { addLights, makeAtmosphere, makeStars } from './scene'
 import { UI } from './ui'
 import './styles.css'
@@ -22,7 +23,8 @@ import './styles.css'
 // LOD bands (camera distance): cards near, cluster labels far
 const CARDS_FADE = [0.7, 1.5] as const
 const LABELS_FADE = [0.9, 1.7] as const
-const CARD_ALTITUDE = 0.016
+const ARC_COLOR = '#ff8a5c'
+const ARC_HOVER = '#ffd27a'
 
 const app = document.getElementById('app')!
 const renderer = new THREE.WebGLRenderer({ antialias: true })
@@ -134,28 +136,29 @@ async function refresh(force = false): Promise<void> {
 }
 
 function cardAltitude(p: THREE.Vector3): number {
-  return 1 + Math.max(0, globe.elevation(p)) + CARD_ALTITUDE
+  return 1 + Math.max(0, globe.elevation(p)) + CARD_ANCHOR_ALTITUDE
 }
 
 function rebuild(): void {
   if (!world) return
   globe.update(world.items)
+  minimap.setWorld(world.items)
   for (const child of [...cards.children]) {
     cards.remove(child)
-    disposeCard(child as THREE.Mesh)
+    disposeCard(child as THREE.Sprite)
   }
   for (const item of world.items) {
-    const mesh = makeCard(item, globe.elevation(new THREE.Vector3(...item.pos)))
-    const target = (mesh.userData.normal as THREE.Vector3).clone()
+    const sprite = makeCard(item, globe.elevation(new THREE.Vector3(...item.pos)))
+    const target = (sprite.userData.normal as THREE.Vector3).clone()
     const prev = lastPositions.get(item.id)
     if (prev && prev.angleTo(target) > 0.004) {
       // start at the old spot and glide to the new one
-      mesh.userData.normal = prev.clone()
-      mesh.position.copy(prev).multiplyScalar(cardAltitude(prev))
-      mesh.userData.glideTo = target
+      sprite.userData.normal = prev.clone()
+      sprite.position.copy(prev).multiplyScalar(cardAltitude(prev))
+      sprite.userData.glideTo = target
     }
     lastPositions.set(item.id, target)
-    cards.add(mesh)
+    cards.add(sprite)
   }
   for (const id of [...lastPositions.keys()]) {
     if (!world.items.some((i) => i.id === id)) lastPositions.delete(id)
@@ -179,9 +182,9 @@ function rebuild(): void {
 function drawArcs(): void {
   for (const child of [...arcs.children]) {
     arcs.remove(child)
-    const line = child as THREE.Line
-    line.geometry.dispose()
-    ;(line.material as THREE.Material).dispose()
+    const mesh = child as THREE.Mesh
+    mesh.geometry.dispose()
+    ;(mesh.material as THREE.Material).dispose()
   }
   if (!world || selectedId === null) return
   const byId = new Map(world.items.map((i) => [i.id, i]))
@@ -194,29 +197,32 @@ function drawArcs(): void {
   }
 }
 
-function makeArc(a: WorldItem, b: WorldItem): THREE.Line {
+/** Flight paths are tubes (real thickness, hoverable, clickable). */
+function makeArc(a: WorldItem, b: WorldItem): THREE.Mesh {
   const av = new THREE.Vector3(...a.pos)
   const bv = new THREE.Vector3(...b.pos)
   const angle = av.angleTo(bv)
   const elevA = Math.max(0, globe.elevation(av))
   const elevB = Math.max(0, globe.elevation(bv))
   const points: THREE.Vector3[] = []
-  for (let i = 0; i <= 64; i++) {
-    const t = i / 64
+  for (let i = 0; i <= 48; i++) {
+    const t = i / 48
     const p = av.clone().lerp(bv, t).normalize()
     const base = 1 + elevA * (1 - t) + elevB * t + 0.018
     p.multiplyScalar(base + Math.sin(t * Math.PI) * (0.02 + angle * 0.05))
     points.push(p)
   }
-  const geometry = new THREE.BufferGeometry().setFromPoints(points)
-  const material = new THREE.LineBasicMaterial({
-    color: '#ff8a5c',
+  const curve = new THREE.CatmullRomCurve3(points)
+  const geometry = new THREE.TubeGeometry(curve, 72, 0.003, 6, false)
+  const material = new THREE.MeshBasicMaterial({
+    color: ARC_COLOR,
     transparent: true,
-    opacity: 0.95,
+    opacity: 0.92,
   })
-  const line = new THREE.Line(geometry, material)
-  line.userData.ends = [a, b] // clickable: ride the arc to the far end
-  return line
+  const mesh = new THREE.Mesh(geometry, material)
+  mesh.userData.ends = [a, b] // clickable: ride the arc to the far end
+  mesh.userData.arc = true
+  return mesh
 }
 
 async function select(id: number): Promise<void> {
@@ -232,14 +238,13 @@ async function select(id: number): Promise<void> {
 // -- picking ----------------------------------------------------------------
 
 const raycaster = new THREE.Raycaster()
-raycaster.params.Line = { threshold: 0.008 }
 const pointer = new THREE.Vector2()
 let downAt: [number, number] | null = null
 
 interface Hit {
   card?: WorldItem
   cluster?: Cluster
-  arc?: THREE.Line
+  arc?: THREE.Mesh
   surface?: THREE.Vector3
   object?: THREE.Object3D
 }
@@ -261,7 +266,7 @@ function raycastAt(clientX: number, clientY: number): Hit | null {
   }
   if (arcs.children.length > 0) {
     const arcHit = raycaster.intersectObjects(arcs.children, false)[0]
-    if (arcHit) return { arc: arcHit.object as THREE.Line, object: arcHit.object }
+    if (arcHit) return { arc: arcHit.object as THREE.Mesh, object: arcHit.object }
   }
   const globeHit = raycaster.intersectObject(globe.land, false)[0]
   if (globeHit) return { surface: globeHit.point.clone().normalize() }
@@ -270,12 +275,12 @@ function raycastAt(clientX: number, clientY: number): Hit | null {
 
 // -- card dragging (local freeform) -------------------------------------------
 
-let draggingCard: THREE.Mesh | null = null
+let draggingCard: THREE.Sprite | null = null
 
 controls.ignorePointer = (e) => {
   if (!cards.visible) return false
   const hit = raycastAt(e.clientX, e.clientY)
-  if (hit?.card && hit.object instanceof THREE.Mesh) {
+  if (hit?.card && hit.object instanceof THREE.Sprite) {
     draggingCard = hit.object
     return true
   }
@@ -345,16 +350,28 @@ renderer.domElement.addEventListener('dblclick', (e) => {
   }
 })
 
+function unhover(obj: THREE.Object3D): void {
+  if (obj instanceof THREE.Sprite) obj.scale.divideScalar(1.12)
+  else if (obj.userData.arc) {
+    ;((obj as THREE.Mesh).material as THREE.MeshBasicMaterial).color.set(ARC_COLOR)
+  }
+}
+
+function applyHover(obj: THREE.Object3D): void {
+  if (obj instanceof THREE.Sprite) obj.scale.multiplyScalar(1.12)
+  else if (obj.userData.arc) {
+    ;((obj as THREE.Mesh).material as THREE.MeshBasicMaterial).color.set(ARC_HOVER)
+  }
+}
+
 renderer.domElement.addEventListener('pointermove', (e) => {
   if (e.buttons !== 0) return
   const hit = raycastAt(e.clientX, e.clientY)
-  const target = hit?.card || hit?.cluster ? (hit.object ?? null) : null
+  const target = hit?.card || hit?.cluster || hit?.arc ? (hit.object ?? null) : null
   if (target !== hovered) {
-    if (hovered instanceof THREE.Mesh) hovered.scale.setScalar(1)
-    if (hovered instanceof THREE.Sprite) hovered.scale.divideScalar(1.12)
+    if (hovered) unhover(hovered)
     hovered = target
-    if (hovered instanceof THREE.Mesh) hovered.scale.setScalar(1.12)
-    if (hovered instanceof THREE.Sprite) hovered.scale.multiplyScalar(1.12)
+    if (hovered) applyHover(hovered)
     renderer.domElement.style.cursor = hovered ? 'pointer' : 'grab'
   }
 })
@@ -476,42 +493,26 @@ document.addEventListener('click', (e) => {
   }
 })
 
-// -- card orientation + glide -----------------------------------------------------
+// -- card glide ---------------------------------------------------------------
 
-const camUp = new THREE.Vector3()
-const cardUp = new THREE.Vector3()
-const cardRight = new THREE.Vector3()
-const cardBasis = new THREE.Matrix4()
-
-/** Keep every card tangent to the sphere but rotated about its normal so its
- * text "up" tracks the camera's up — always readable, never upside-down.
- * Cards with a glide target also drift toward it here. */
-function orientCards(dt: number): void {
+/** Sprites billboard themselves; this only drifts cards that have a glide
+ * target (drift tick, re-placed edits) toward their new home. */
+function updateGlides(dt: number): void {
   if (!cards.visible) return
-  camUp.setFromMatrixColumn(camera.matrixWorld, 1)
   const glide = 1 - Math.exp(-dt * 1.4)
   for (const child of cards.children) {
-    const mesh = child as THREE.Mesh
-    const n = mesh.userData.normal as THREE.Vector3
-    const to = mesh.userData.glideTo as THREE.Vector3 | undefined
-    if (to) {
-      const angle = n.angleTo(to)
-      if (angle < 0.002) {
-        mesh.userData.glideTo = undefined
-      } else {
-        const axis = new THREE.Vector3().crossVectors(n, to)
-        if (axis.lengthSq() > 1e-12) {
-          n.applyAxisAngle(axis.normalize(), angle * glide)
-          mesh.position.copy(n).multiplyScalar(cardAltitude(n))
-        }
-      }
+    const sprite = child as THREE.Sprite
+    const n = sprite.userData.normal as THREE.Vector3
+    const to = sprite.userData.glideTo as THREE.Vector3 | undefined
+    if (!to) continue
+    const angle = n.angleTo(to)
+    const axis = new THREE.Vector3().crossVectors(n, to)
+    if (angle < 0.002 || axis.lengthSq() < 1e-12) {
+      sprite.userData.glideTo = undefined
+      continue
     }
-    cardUp.copy(camUp).addScaledVector(n, -camUp.dot(n))
-    if (cardUp.lengthSq() < 1e-8) continue
-    cardUp.normalize()
-    cardRight.crossVectors(cardUp, n)
-    cardBasis.makeBasis(cardRight, cardUp, n)
-    mesh.setRotationFromMatrix(cardBasis)
+    n.applyAxisAngle(axis.normalize(), angle * glide)
+    sprite.position.copy(n).multiplyScalar(cardAltitude(n))
   }
 }
 
@@ -529,12 +530,19 @@ function applyLod(): void {
   cards.visible = cardOpacity > 0.02
   labels.visible = labelOpacity > 0.02
   for (const child of cards.children) {
-    ;((child as THREE.Mesh).material as THREE.MeshBasicMaterial).opacity = cardOpacity
+    ;(child as THREE.Sprite).material.opacity = cardOpacity
   }
   for (const child of labels.children) {
     ;(child as THREE.Sprite).material.opacity = labelOpacity
   }
 }
+
+// -- minimap ------------------------------------------------------------------
+
+const minimap = new Minimap(
+  document.getElementById('minimap') as HTMLCanvasElement,
+  (dir) => controls.flyTo(dir, { distance: controls.distance, tilt: controls.tilt }),
+)
 
 // -- loop -------------------------------------------------------------------
 
@@ -545,7 +553,8 @@ renderer.setAnimationLoop(() => {
   lastFrame = now
   controls.update(now)
   applyLod()
-  orientCards(dt)
+  updateGlides(dt)
+  minimap.draw(controls.target)
   renderer.render(scene, camera)
 })
 
