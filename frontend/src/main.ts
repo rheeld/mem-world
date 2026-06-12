@@ -601,13 +601,16 @@ function applyLod(): void {
   const labelOpacity = smoothstep(d, LABELS_FADE[0], LABELS_FADE[1])
   cards.visible = cardOpacity > 0.02
   labels.visible = labelOpacity > 0.02
-  for (const child of cards.children) {
-    ;(child as THREE.Sprite).material.opacity = cardOpacity
-  }
-  // labels skip the depth test (terrain would slice them at the horizon),
-  // so hide the ones past the limb by hand
+  // cards and labels skip the depth test (terrain would slice them), so
+  // occlude the ones past the planet's limb by hand
   const camDir = camera.position.clone().normalize()
   const horizon = 1 / Math.max(camera.position.length(), 1.0001)
+  for (const child of cards.children) {
+    const sprite = child as THREE.Sprite
+    sprite.material.opacity = cardOpacity
+    const n = sprite.userData.normal as THREE.Vector3
+    sprite.visible = n.dot(camDir) > horizon - 0.015
+  }
   for (const child of labels.children) {
     const sprite = child as THREE.Sprite
     sprite.material.opacity = labelOpacity

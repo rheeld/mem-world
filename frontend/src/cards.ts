@@ -175,13 +175,17 @@ export function makeCard(item: WorldItem, elevation = 0): THREE.Sprite {
     }
     img.src = fileUrl(item.id)
   }
+  // no depth test: nearby terrain would bite chunks out of the quad.
+  // cards past the horizon are culled manually each frame (applyLod).
   const material = new THREE.SpriteMaterial({
     map: texture,
     transparent: true,
-    depthWrite: false, // transparent margins must not clip neighbours
+    depthTest: false,
+    depthWrite: false,
     alphaTest: 0.04,
   })
   const sprite = new THREE.Sprite(material)
+  sprite.renderOrder = 15 // above terrain and arcs, below cluster labels
   sprite.center.set(0.5, 0) // anchor at the notch tip; the flag rises upward
   sprite.scale.set(CARD_W, CARD_H, 1)
   const p = new THREE.Vector3(...item.pos).normalize()
