@@ -148,7 +148,6 @@ function cardAltitude(p: THREE.Vector3): number {
 function rebuild(): void {
   if (!world) return
   globe.update(world.items)
-  minimap.setWorld(world.items)
   for (const child of [...cards.children]) {
     cards.remove(child)
     disposeCard(child as THREE.Sprite)
@@ -180,6 +179,11 @@ function rebuild(): void {
     sprite.material.clippingPlanes = [horizonPlane]
     labels.add(sprite)
   }
+  minimap.setWorld(
+    world.items,
+    clusters.map((c) => ({ center: c.center, label: c.label, count: c.items.length })),
+  )
+  if (!sidebar.hidden) renderSidebar()
   drawArcs()
   ui.setStatus(
     world.items.length === 0
@@ -630,6 +634,80 @@ function applyLod(): void {
     sprite.visible = center.dot(camDir) > horizon - 0.12
   }
 }
+
+// -- sidebar (vault file tree) ---------------------------------------------------
+
+const sidebar = document.getElementById('sidebar')!
+const KIND_GLYPH: Record<string, string> = { note: '¶', pdf: '⎘', image: '✦' }
+
+function escapeHtml(s: string): string {
+  return s
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+}
+
+interface TreeDir {
+  dirs: Map<string, TreeDir>
+  files: WorldItem[]
+}
+
+function buildTree(items: WorldItem[]): TreeDir {
+  const root: TreeDir = { dirs: new Map(), files: [] }
+  for (const item of [...items].sort((a, b) => a.path.localeCompare(b.path))) {
+    const parts = item.path.split('/')
+    let node = root
+    for (const part of parts.slice(0, -1)) {
+      let dir = node.dirs.get(part)
+      if (!dir) node.dirs.set(part, (dir = { dirs: new Map(), files: [] }))
+      node = dir
+    }
+    node.files.push(item)
+  }
+  return root
+}
+
+function renderTreeHtml(node: TreeDir): string {
+  let html = '<ul>'
+  for (const [name, dir] of node.dirs) {
+    html += `<li><details open><summary>${escapeHtml(name)}</summary>${renderTreeHtml(dir)}</details></li>`
+  }
+  for (const file of node.files) {
+    html += `<li class="tree-file" data-id="${file.id}"><span class="glyph ${file.kind}">${
+      KIND_GLYPH[file.kind] ?? '·'
+    }</span>${escapeHtml(file.title)}</li>`
+  }
+  return html + '</ul>'
+}
+
+function openItem(id: number): void {
+  const item = world?.items.find((i) => i.id === id)
+  if (item) controls.flyTo(new THREE.Vector3(...item.pos))
+  void select(id)
+}
+
+function renderSidebar(): void {
+  if (!world) return
+  const counts: Record<string, number> = { note: 0, pdf: 0, image: 0 }
+  for (const item of world.items) counts[item.kind] = (counts[item.kind] ?? 0) + 1
+  document.getElementById('sidebar-stats')!.textContent =
+    `${world.items.length} items — ${counts.note} notes · ${counts.pdf} pdfs · ` +
+    `${counts.image} images — ${clusters.length} regions`
+  const tree = document.getElementById('sidebar-tree')!
+  tree.innerHTML = renderTreeHtml(buildTree(world.items))
+  tree.querySelectorAll<HTMLElement>('.tree-file').forEach((el) =>
+    el.addEventListener('click', () => openItem(Number(el.dataset.id))),
+  )
+}
+
+document.getElementById('menu-btn')!.addEventListener('click', () => {
+  sidebar.hidden = !sidebar.hidden
+  if (!sidebar.hidden) renderSidebar()
+})
+document.getElementById('sidebar-close')!.addEventListener('click', () => {
+  sidebar.hidden = true
+})
 
 // -- minimap ------------------------------------------------------------------
 

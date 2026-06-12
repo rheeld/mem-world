@@ -7,21 +7,38 @@
   </head>
   <body>
     <div id="app"></div>
-    <header id="topbar">
-      <h1>mem·world</h1>
-      <div id="searchbox">
+    <nav id="hud">
+      <button id="menu-btn" class="hud-card" title="menu">☰</button>
+      <div id="searchbox" class="hud-card">
         <input id="search" placeholder="search the world…" autocomplete="off" spellcheck="false" />
         <ul id="results" hidden></ul>
       </div>
-      <button id="new-note" class="bar-btn" title="new note at the view centre">＋ note</button>
+      <button id="new-note" class="hud-card" title="new note at the view centre">＋ note</button>
       <div id="viewsbox">
-        <button id="views-btn" class="bar-btn" title="saved views">☆ views</button>
+        <button id="views-btn" class="hud-card" title="saved views">☆ views</button>
         <ul id="views-list" hidden></ul>
       </div>
-      <div id="status">waking the world…</div>
-    </header>
+      <div id="status" class="hud-card hud-info">waking the world…</div>
+    </nav>
+    <aside id="sidebar" hidden>
+      <button class="close" id="sidebar-close" title="close">×</button>
+      <h1>mem·world</h1>
+      <div id="sidebar-stats" class="sidebar-stats"></div>
+      <h3>vault</h3>
+      <div id="sidebar-tree"></div>
+      <h3>travelling</h3>
+      <ul class="help">
+        <li><b>drag</b> — pan the globe</li>
+        <li><b>scroll</b> — zoom</li>
+        <li><b>hold right mouse</b> — tilt toward the horizon</li>
+        <li><b>double-click terrain</b> — new note there</li>
+        <li><b>right-click a note</b> — open · move · pin</li>
+        <li><b>click a flight path</b> — ride it</li>
+        <li><b>drop files anywhere</b> — they join the world</li>
+      </ul>
+    </aside>
     <aside id="panel" hidden></aside>
-    <canvas id="minimap" title="click to travel"></canvas>
+    <canvas id="minimap" title="scroll to zoom · click to travel"></canvas>
     <ul id="ctxmenu" hidden></ul>
     <script type="module" src="/src/main.ts"></script>
   </body>
