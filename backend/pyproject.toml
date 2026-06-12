@@ -13,6 +13,7 @@ dependencies = [
     "numpy>=1.26",
     "pypdf>=4.0",
     "python-frontmatter>=1.1",
+    "python-multipart>=0.0.9",
 ]
 
 [build-system]

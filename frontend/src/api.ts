@@ -17,9 +17,17 @@ export interface WorldState {
   links: [number, number][]
 }
 
+export interface LinkedRef {
+  id: number
+  title: string
+  kind: WorldItem['kind']
+}
+
 export interface ItemDetail extends WorldItem {
   content: string
   modified_at: number
+  links_out: LinkedRef[]
+  links_in: LinkedRef[]
 }
 
 async function getJson<T>(url: string): Promise<T> {
@@ -74,4 +82,24 @@ export function updateNote(id: number, content: string): Promise<ItemDetail> {
 
 export function deleteItem(id: number): Promise<{ ok: boolean }> {
   return sendJson(`${BASE}/items/${id}`, 'DELETE')
+}
+
+export function setPosition(
+  id: number,
+  pos: [number, number, number],
+  pinned: boolean,
+): Promise<ItemDetail> {
+  return sendJson(`${BASE}/items/${id}/position`, 'PATCH', { pos, pinned })
+}
+
+export async function uploadFile(
+  file: File,
+  pos?: [number, number, number],
+): Promise<ItemDetail> {
+  const form = new FormData()
+  form.append('file', file)
+  if (pos) form.append('pos', JSON.stringify(pos))
+  const res = await fetch(`${BASE}/upload`, { method: 'POST', body: form })
+  if (!res.ok) throw new Error(`upload ${file.name}: ${res.status}`)
+  return res.json() as Promise<ItemDetail>
 }

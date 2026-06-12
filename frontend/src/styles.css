@@ -113,6 +113,72 @@ body {
   background: #5a7fb5;
 }
 
+.bar-btn {
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 14px;
+  background: #fbf5e4;
+  color: #4a3b28;
+  border: 1.5px solid #8a7350;
+  border-radius: 16px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s ease;
+}
+
+.bar-btn:hover {
+  background: #efe3c2;
+}
+
+#viewsbox {
+  position: relative;
+}
+
+#views-list {
+  position: absolute;
+  top: 120%;
+  right: 0;
+  min-width: 230px;
+  list-style: none;
+  padding: 6px;
+  background: #fbf5e4;
+  border: 1.5px solid #8a7350;
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  z-index: 20;
+}
+
+#views-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+#views-list li:hover {
+  background: #efe3c2;
+}
+
+#views-list .views-save {
+  font-style: italic;
+  color: #7a6748;
+  border-bottom: 1px solid #d9caa3;
+  border-radius: 6px 6px 0 0;
+}
+
+#views-list .del {
+  color: #99876a;
+  padding: 0 4px;
+}
+
+#views-list .del:hover {
+  color: #a05038;
+}
+
 #status {
   margin-left: auto;
   font-size: 12px;
@@ -275,6 +341,106 @@ body {
   margin-top: 16px;
   font-size: 11px;
   color: #99876a;
+}
+
+/* wikilinks + link rows */
+
+#panel .wikilink {
+  color: #8a4a32;
+  border-bottom: 1px dashed #b08a6a;
+  cursor: pointer;
+}
+
+#panel .wikilink:hover {
+  background: rgba(196, 106, 74, 0.12);
+}
+
+#panel .linkbox {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #d9caa3;
+  font-size: 13px;
+}
+
+#panel .linkrow {
+  margin-bottom: 8px;
+}
+
+#panel .linklabel {
+  display: inline-block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: #99876a;
+  margin-right: 8px;
+}
+
+#panel .chip {
+  display: inline-block;
+  background: rgba(122, 103, 72, 0.12);
+  border-radius: 10px;
+  padding: 2px 10px;
+  margin: 0 6px 6px 0;
+  cursor: pointer;
+  font-size: 12.5px;
+}
+
+#panel .chip:hover {
+  background: rgba(122, 103, 72, 0.24);
+}
+
+#panel .tag {
+  cursor: pointer;
+}
+
+#panel .tag:hover {
+  background: rgba(122, 103, 72, 0.26);
+}
+
+/* region panel */
+
+#panel .kind-breakdown {
+  font-size: 13px;
+  font-style: italic;
+  color: #7a6748;
+  margin-bottom: 12px;
+}
+
+#panel .region-list {
+  list-style: none;
+  padding: 0;
+}
+
+#panel .region-item {
+  padding: 7px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+#panel .region-item:hover {
+  background: #efe3c2;
+}
+
+#panel .glyph {
+  display: inline-block;
+  width: 1.4em;
+  text-align: center;
+  border-radius: 5px;
+  margin-right: 4px;
+  color: #faf3e0;
+}
+
+#panel .glyph.note {
+  background: #7fa75e;
+}
+
+#panel .glyph.pdf {
+  background: #c46a4a;
+}
+
+#panel .glyph.image {
+  background: #5a7fb5;
 }
 
 /* editor */

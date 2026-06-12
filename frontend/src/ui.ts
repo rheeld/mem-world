@@ -1,18 +1,29 @@
 import { marked } from 'marked'
 import * as pdfjs from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
-import { fileUrl, type ItemDetail, type WorldItem } from './api'
+import { fileUrl, type ItemDetail, type LinkedRef, type WorldItem } from './api'
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl
+
+export interface RegionInfo {
+  label: string
+  items: WorldItem[]
+}
 
 export interface UIHandlers {
   onSearch(q: string): Promise<WorldItem[]>
   onPick(item: WorldItem): void
+  onOpen(id: number): void
+  onNavigate(title: string): void
   onCreate(title: string, content: string, pos: [number, number, number]): Promise<void>
   onSave(id: number, content: string): Promise<ItemDetail>
   onDelete(id: number): Promise<void>
+  onTogglePin(item: ItemDetail): Promise<ItemDetail>
+  onNewNote(): void
   onClose(): void
 }
+
+const KIND_GLYPH: Record<string, string> = { note: '¶', pdf: '⎘', image: '✦' }
 
 function escapeHtml(s: string): string {
   return s
@@ -20,6 +31,29 @@ function escapeHtml(s: string): string {
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
+}
+
+/** Turn [[wikilinks]] (with optional |alias) into clickable spans before the
+ * markdown pass; marked passes inline HTML through. */
+function renderWikilinks(md: string): string {
+  return md.replace(
+    /\[\[([^\]|#\n]+)(?:\|([^\]\n]+))?\]\]/g,
+    (_m, target: string, alias?: string) =>
+      `<span class="wikilink" data-target="${escapeHtml(target.trim())}">${escapeHtml(
+        (alias ?? target).trim(),
+      )}</span>`,
+  )
+}
+
+function linkChips(refs: LinkedRef[]): string {
+  return refs
+    .map(
+      (r) =>
+        `<span class="chip" data-id="${r.id}">${KIND_GLYPH[r.kind] ?? '·'} ${escapeHtml(
+          r.title,
+        )}</span>`,
+    )
+    .join('')
 }
 
 export class UI {
@@ -30,6 +64,9 @@ export class UI {
 
   constructor(private handlers: UIHandlers) {
     this.bindSearch()
+    document.getElementById('new-note')?.addEventListener('click', () => {
+      this.handlers.onNewNote()
+    })
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') this.hide()
     })
@@ -56,13 +93,24 @@ export class UI {
     this.pdfTask = null
     this.panel.classList.toggle('wide', item.kind === 'pdf')
     const tags = item.tags
-      .map((t) => `<span class="tag">#${escapeHtml(t)}</span>`)
+      .map((t) => `<span class="tag" data-tag="${escapeHtml(t)}">#${escapeHtml(t)}</span>`)
       .join('')
+    const pinLabel = item.pinned ? 'unpin' : 'pin here'
     const actions =
       item.kind === 'note'
-        ? `<button data-act="edit">edit</button><button data-act="delete" class="danger">delete</button>`
-        : `<a href="${fileUrl(item.id)}" target="_blank" rel="noopener"><button>open file</button></a>
+        ? `<button data-act="edit">edit</button>
+           <button data-act="pin">${pinLabel}</button>
            <button data-act="delete" class="danger">delete</button>`
+        : `<a href="${fileUrl(item.id)}" target="_blank" rel="noopener"><button>open file</button></a>
+           <button data-act="pin">${pinLabel}</button>
+           <button data-act="delete" class="danger">delete</button>`
+    const linkbox =
+      (item.links_out.length
+        ? `<div class="linkrow"><span class="linklabel">links to</span>${linkChips(item.links_out)}</div>`
+        : '') +
+      (item.links_in.length
+        ? `<div class="linkrow"><span class="linklabel">linked from</span>${linkChips(item.links_in)}</div>`
+        : '')
     this.panel.innerHTML = `
       <button class="close" title="close (esc)">×</button>
       <div class="kind">${item.kind}${item.pinned ? ' · pinned' : ''}</div>
@@ -70,6 +118,7 @@ export class UI {
       <div class="tags">${tags}</div>
       <div class="actions">${actions}</div>
       <div class="content"></div>
+      ${linkbox ? `<div class="linkbox">${linkbox}</div>` : ''}
       <div class="path">${escapeHtml(item.path)}</div>`
     this.panel.hidden = false
     this.panel.scrollTop = 0
@@ -80,15 +129,71 @@ export class UI {
     this.panel
       .querySelector('[data-act="edit"]')
       ?.addEventListener('click', () => this.showEditor(item))
+    this.panel.querySelector('[data-act="pin"]')?.addEventListener('click', async () => {
+      const updated = await this.handlers.onTogglePin(item)
+      this.showItem(updated)
+    })
+    this.panel.querySelectorAll<HTMLElement>('.tag').forEach((el) =>
+      el.addEventListener('click', () => this.searchFor(el.dataset.tag!)),
+    )
+    this.panel.querySelectorAll<HTMLElement>('.chip').forEach((el) =>
+      el.addEventListener('click', () => this.handlers.onOpen(Number(el.dataset.id))),
+    )
 
     const content = this.panel.querySelector<HTMLElement>('.content')!
     if (item.kind === 'note') {
-      content.innerHTML = marked.parse(item.content, { async: false }) as string
+      content.innerHTML = marked.parse(renderWikilinks(item.content), {
+        async: false,
+      }) as string
+      content.querySelectorAll<HTMLElement>('.wikilink').forEach((el) =>
+        el.addEventListener('click', () => this.handlers.onNavigate(el.dataset.target!)),
+      )
     } else if (item.kind === 'pdf') {
       void this.renderPdf(item, content)
     } else {
       content.innerHTML = `<img class="full-image" src="${fileUrl(item.id)}" alt="${escapeHtml(item.title)}">`
     }
+  }
+
+  // -- region view -------------------------------------------------------------
+
+  showRegion(region: RegionInfo): void {
+    this.session++
+    void this.pdfTask?.destroy().catch(() => {})
+    this.pdfTask = null
+    this.panel.classList.remove('wide')
+    const counts = new Map<string, number>()
+    for (const i of region.items) counts.set(i.kind, (counts.get(i.kind) ?? 0) + 1)
+    const breakdown = [...counts.entries()]
+      .map(([k, n]) => `${n} ${k}${n > 1 ? 's' : ''}`)
+      .join(' · ')
+    const rows = region.items
+      .map(
+        (i) =>
+          `<li class="region-item" data-id="${i.id}">
+            <span class="glyph ${i.kind}">${KIND_GLYPH[i.kind] ?? '·'}</span>
+            ${escapeHtml(i.title)}</li>`,
+      )
+      .join('')
+    this.panel.innerHTML = `
+      <button class="close" title="close (esc)">×</button>
+      <div class="kind">region</div>
+      <h2>${escapeHtml(region.label)}</h2>
+      <div class="kind-breakdown">${breakdown}</div>
+      <ul class="region-list">${rows}</ul>`
+    this.panel.hidden = false
+    this.panel.scrollTop = 0
+    this.panel.querySelector('.close')!.addEventListener('click', () => this.hide())
+    this.panel.querySelectorAll<HTMLElement>('.region-item').forEach((el) =>
+      el.addEventListener('click', () => this.handlers.onOpen(Number(el.dataset.id))),
+    )
+  }
+
+  private searchFor(q: string): void {
+    const input = document.getElementById('search') as HTMLInputElement
+    input.value = q
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    input.focus()
   }
 
   private async confirmDelete(item: ItemDetail): Promise<void> {
@@ -153,7 +258,6 @@ export class UI {
     }
     this.pdfTask = task
     container.innerHTML = ''
-    const pageCount = doc.numPages
     const observer = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
@@ -187,7 +291,7 @@ export class UI {
         /* page render cancelled or failed; leave the placeholder */
       }
     }
-    for (let i = 1; i <= pageCount; i++) {
+    for (let i = 1; i <= doc.numPages; i++) {
       const holder = document.createElement('div')
       holder.className = 'page'
       holder.dataset.page = String(i)
@@ -257,7 +361,7 @@ export class UI {
         list.innerHTML = results
           .map(
             (r) => `<li><span class="glyph ${r.kind}">${
-              r.kind === 'pdf' ? '⎘' : r.kind === 'image' ? '✦' : '¶'
+              KIND_GLYPH[r.kind] ?? '·'
             }</span> ${escapeHtml(r.title)}</li>`,
           )
           .join('')

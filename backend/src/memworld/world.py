@@ -110,6 +110,12 @@ class World:
                     item_id,
                 ),
             )
+            # content changed -> meaning may have moved; unpinned items get
+            # re-placed by the layout pass (the frontend glides them over)
+            self.db.execute(
+                "UPDATE items SET x=NULL, y=NULL, z=NULL WHERE id=? AND pinned=0",
+                (item_id,),
+            )
         else:
             cur = self.db.execute(
                 "INSERT INTO items(path, kind, title, tags, text, link_targets, "
@@ -230,6 +236,22 @@ class World:
             if r is None:
                 return None
             detail = self._item_summary(r)
+            detail["links_out"] = [
+                {"id": l["id"], "title": l["title"], "kind": l["kind"]}
+                for l in self.db.execute(
+                    "SELECT i.id, i.title, i.kind FROM links l "
+                    "JOIN items i ON i.id = l.dst WHERE l.src=?",
+                    (item_id,),
+                )
+            ]
+            detail["links_in"] = [
+                {"id": l["id"], "title": l["title"], "kind": l["kind"]}
+                for l in self.db.execute(
+                    "SELECT i.id, i.title, i.kind FROM links l "
+                    "JOIN items i ON i.id = l.src WHERE l.dst=?",
+                    (item_id,),
+                )
+            ]
             if Path(r["path"]).suffix.lower() in MD_EXTS:
                 import frontmatter
 
@@ -296,6 +318,32 @@ class World:
             item = self.get_item(row["id"])
             assert item is not None
             return item
+
+    def drift_step(self) -> None:
+        """One gentle settle iteration — the slow tectonic drift. Pinned items
+        never move; the frontend animates the rest."""
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT id, x, y, z, pinned FROM items WHERE x IS NOT NULL"
+            ).fetchall()
+            vec_map = self._load_vectors()
+            rows = [r for r in rows if r["id"] in vec_map]
+            if len(rows) < 5:
+                return
+            ids = [r["id"] for r in rows]
+            pos = np.array([[r["x"], r["y"], r["z"]] for r in rows])
+            vecs = np.stack([vec_map[i] for i in ids])
+            pinned = np.array([bool(r["pinned"]) for r in rows])
+            new = layout.settle(
+                pos, vecs, pinned, steps=1, attract=0.1, repel=0.002, max_step=0.0035
+            )
+            if float(np.abs(new - pos).max()) < 1e-7:
+                return
+            for i, item_id in enumerate(ids):
+                if not pinned[i]:
+                    self._write_position(item_id, new[i])
+            self.db.commit()
+            self._bump()
 
     def update_note(self, item_id: int, content: str) -> dict | None:
         with self.lock:

@@ -51,13 +51,65 @@ export function computeClusters(items: WorldItem[], radius = 0.6): Cluster[] {
     if (!g) groups.set(assign[i], (g = []))
     g.push(i)
   }
-  return [...groups.values()].map((idx) => {
+  const result = [...groups.values()].map((idx) => {
     const members = idx.map((i) => items[i])
     const center = idx
       .reduce((acc, i) => acc.add(dirs[i]), new THREE.Vector3())
       .normalize()
     return { center, items: members, label: labelFor(members, center) }
   })
+  disambiguate(result)
+  return result
+}
+
+/** Two regions named "Art" reads as a bug — give duplicates a second tag or
+ * their most central title as a qualifier. */
+function disambiguate(clusters: Cluster[]): void {
+  const byLabel = new Map<string, Cluster[]>()
+  for (const c of clusters) {
+    let g = byLabel.get(c.label)
+    if (!g) byLabel.set(c.label, (g = []))
+    g.push(c)
+  }
+  for (const [label, group] of byLabel) {
+    if (group.length < 2) continue
+    for (const c of group) {
+      const counts = new Map<string, number>()
+      for (const m of c.items) {
+        for (const t of m.tags) {
+          if (titleCase(t) !== label) counts.set(t, (counts.get(t) ?? 0) + 1)
+        }
+      }
+      const second = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0]
+      if (second) {
+        c.label = `${label} · ${titleCase(second)}`
+      } else {
+        const central = centralTitle(c)
+        if (central && central !== label) c.label = `${label} · ${central}`
+      }
+    }
+    // second tags can collide too (two art clusters, both mostly #artist) —
+    // anything still duplicated falls back to its most central title
+    const seen = new Set<string>()
+    for (const c of group) {
+      if (seen.has(c.label)) c.label = `${label} · ${centralTitle(c)}`
+      seen.add(c.label)
+    }
+  }
+}
+
+function centralTitle(c: Cluster): string {
+  let pick = c.items[0]
+  let pickDist = Infinity
+  for (const m of c.items) {
+    const d = new THREE.Vector3(...m.pos).angleTo(c.center)
+    if (d < pickDist) {
+      pickDist = d
+      pick = m
+    }
+  }
+  const t = pick.title.replace(/_/g, ' ')
+  return t.length > 18 ? t.slice(0, 17).trimEnd() + '…' : t
 }
 
 function titleCase(s: string): string {

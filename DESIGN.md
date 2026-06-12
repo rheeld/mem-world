@@ -111,16 +111,28 @@ One island, every feature at minimum quality, end-to-end:
 
 Then broaden.
 
-## Implementation status notes (2026-06-11)
+## Implementation status notes (2026-06-12)
 
-- Zoom-LOD aggregation v1 is live: cards near, cluster-label pills far
-  (single-linkage clustering in the frontend, named by dominant tag); summary
-  cards and multi-level hierarchy still to come.
+- Zoom-LOD aggregation v1 is live: cards near, cluster-label pills far (leader
+  clustering, named by dominant tag, disambiguated); clicking a label flies in
+  and opens a region panel (kind breakdown + item list). Multi-level hierarchy
+  still to come.
 - PDFs are readable via an in-panel pdf.js reader (lazy page render). This is
-  a stepping stone — the on-terrain unrolled scroll strip with margins remains
-  the design goal.
-- Notes are editable/deletable in-app; edits write back to vault files with
-  frontmatter preserved.
+  a stepping stone — the on-terrain unrolled scroll strip with margins,
+  highlights, and LiquidText-style excerpt threads remain the design goal.
+- Notes: in-app edit/delete (writes back to vault files, frontmatter
+  preserved), clickable [[wikilinks]], links-to/linked-from rows, clickable
+  tags (feed search), "+ note" button and double-click create.
+- Local freeform v1: drag a card to move + pin it; pin/unpin from the panel.
+  Canvas patches still to come.
+- Slow live drift is on: a gentle settle step every 3 min (backend), and
+  editing a note re-embeds and re-places it; the frontend glides cards to new
+  positions instead of teleporting.
+- Capture: watched vault dir, drag & drop files onto the globe (pins at the
+  drop point), "+ note", double-click. Quick-capture inbox/hotkey still to
+  come.
+- Navigation: search→fly, ride-the-arcs (click an arc to travel it), saved
+  views (bookmarks, localStorage). Minimap still to come.
 
 ## Post-v1 (explicitly deferred)
 - LLM region summaries (cluster prose, auto place-names beyond simple labels)

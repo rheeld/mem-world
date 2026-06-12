@@ -4,19 +4,31 @@ import logging
 import threading
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from .config import Config
-from .vault import start_watcher
+from .vault import VAULT_EXTS, start_watcher
 from .world import World
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
+DRIFT_INTERVAL_S = 180.0
+
 world: World | None = None
 observer = None
+stop_drift = threading.Event()
+
+
+def _drift_loop() -> None:
+    while not stop_drift.wait(DRIFT_INTERVAL_S):
+        try:
+            if world is not None and not world.scanning:
+                world.drift_step()
+        except Exception:
+            logging.getLogger("memworld").exception("drift step failed")
 
 
 @asynccontextmanager
@@ -25,8 +37,10 @@ async def lifespan(app: FastAPI):
     world = World(Config.from_env())
     # first scan loads the embedding model; don't block startup
     threading.Thread(target=world.scan, daemon=True).start()
+    threading.Thread(target=_drift_loop, daemon=True).start()
     observer = start_watcher(world)
     yield
+    stop_drift.set()
     if observer is not None:
         observer.stop()
 
@@ -89,6 +103,37 @@ def create_item(body: CreateNote):
     if not body.title.strip():
         raise HTTPException(422, "title required")
     return _world().create_note(body.title.strip(), body.content, body.pos)
+
+
+@app.post("/api/upload")
+async def upload_file(file: UploadFile = File(...), pos: str | None = Form(None)):
+    import json
+    from pathlib import Path
+
+    w = _world()
+    name = Path(file.filename or "dropped").name.replace("/", "_")
+    suffix = Path(name).suffix.lower()
+    if suffix not in VAULT_EXTS:
+        raise HTTPException(422, f"unsupported file type: {suffix or '(none)'}")
+    inbox = w.cfg.vault / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    dest = inbox / name
+    n = 2
+    while dest.exists():
+        dest = inbox / f"{Path(name).stem}-{n}{suffix}"
+        n += 1
+    dest.write_bytes(await file.read())
+    w.scan()
+    rel = str(dest.relative_to(w.cfg.vault))
+    row = w.db.execute("SELECT id FROM items WHERE path=?", (rel,)).fetchone()
+    if row is None:
+        raise HTTPException(500, "file saved but failed to ingest")
+    if pos:
+        try:
+            w.set_position(row["id"], json.loads(pos), pinned=True)
+        except (ValueError, TypeError):
+            pass
+    return w.get_item(row["id"])
 
 
 class UpdateNote(BaseModel):
