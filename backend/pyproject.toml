@@ -9,6 +9,7 @@ dependencies = [
     "watchdog>=4.0",
     "sentence-transformers>=3.0",
     "umap-learn>=0.5.7",
+    "scipy>=1.11",
     "sqlite-vec>=0.1.6",
     "numpy>=1.26",
     "pypdf>=4.0",

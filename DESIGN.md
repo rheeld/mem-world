@@ -27,9 +27,10 @@ The world starts as empty ocean; knowledge accretes into islands and continents.
   (topbar, cards, panels).
 - **Camera: Google-Earth-style** (`controls.ts`): the camera always looks at a
   point on the surface, never the center. Left-drag pans that point across the
-  globe (ground follows cursor), wheel zooms toward it, right/middle-drag
-  re-anchors to the clicked ground point and arcs around it — tilt toward the
-  horizon + rotate — keeping that point centered.
+  globe (ground follows cursor, as a tangent-plane translation), wheel zooms
+  toward it, holding right/middle mouse tilts toward the horizon and orbits
+  around the current focus. (The earlier "right-drag re-anchors to the clicked
+  point" caused jumps and was replaced by hold-to-tilt.)
 - **Terrain semantics** (all three):
   - elevation = content density / importance (mountains = deepest topics) — implemented
     as vertex displacement from a gaussian density field over item positions
@@ -43,9 +44,16 @@ The world starts as empty ocean; knowledge accretes into islands and continents.
 - **Ocean**: compressed distances + fast travel (search-fly, bookmarks, arcs).
 
 ### Semantic layout engine
-- **Algorithm: spherical UMAP + force settle.** UMAP with spherical/Haversine
-  output gives initial geography; a continuous force simulation (similarity +
-  wikilink attraction, collision repulsion) handles arrivals, pins, and drift.
+- **Algorithm: spherical UMAP, used as-is.** UMAP with spherical/Haversine
+  output gives the geography. (The original plan layered a continuous force
+  `settle` on top, but its long-range repulsion smeared UMAP's global
+  structure — at ~10k items it overwhelmed attraction entirely — so it now
+  only de-overlaps the small-world greedy fallback.) A **collision-only
+  declutter** (damped short-range push-apart, scipy cKDTree) runs after UMAP
+  to guarantee minimum card spacing without disturbing the projection. Because
+  that equalises spacing (flattening terrain), each item's PRE-declutter
+  neighbourhood crowding is recorded as a `weight` that drives terrain height —
+  mountains where knowledge genuinely piles up, even streets between cards.
 - **Slow live drift**: heavily damped continuous motion — items glide toward
   better positions over days, like tectonics you can watch.
 - **Re-embed on save/idle**, then the card begins its slow glide.
@@ -111,37 +119,49 @@ One island, every feature at minimum quality, end-to-end:
 
 Then broaden.
 
-## Implementation status notes (2026-06-12)
+## Implementation status (updated 2026-06-13)
 
-- Zoom-LOD aggregation v1 is live: cards near, cluster-label pills far (leader
-  clustering, named by dominant tag, disambiguated); clicking a label flies in
-  and opens a region panel (kind breakdown + item list). Multi-level hierarchy
-  still to come.
-- PDFs are readable via an in-panel pdf.js reader (lazy page render). This is
-  a stepping stone — the on-terrain unrolled scroll strip with margins,
-  highlights, and LiquidText-style excerpt threads remain the design goal.
-- Notes: in-app edit/delete (writes back to vault files, frontmatter
-  preserved), clickable [[wikilinks]], links-to/linked-from rows, clickable
-  tags (feed search), "+ note" button and double-click create.
-- Local freeform v1: drag a card to move + pin it; pin/unpin from the panel.
-  Canvas patches still to come.
-- Slow live drift is on: a gentle settle step every 3 min (backend), and
-  editing a note re-embeds and re-places it; the frontend glides cards to new
-  positions instead of teleporting.
-- Capture: watched vault dir, drag & drop files onto the globe (pins at the
-  drop point), "+ note", double-click. Quick-capture inbox/hotkey still to
-  come.
-- Navigation: search→fly, ride-the-arcs (click an arc to travel it), saved
-  views (bookmarks, localStorage). Minimap still to come.
+Built and working:
+- **Layout**: spherical UMAP + collision declutter + per-item terrain weights
+  (see Semantic layout engine above). Block-wise kNN and sampled repulsion keep
+  it tractable at ~10k items.
+- **Zoom-LOD hierarchy**: continents → regions → fine clusters → cards, truly
+  nested, with derived (non-manual) names. Clicking a label descends one level;
+  the deepest opens a region panel (kind breakdown + item list). Fine clusters
+  tint their member cards so groupings stay trackable through the zoom.
+- **Cards**: billboard sprites with a pin notch, horizon-clipped (rise over the
+  limb), lazy-pooled (~350 near the camera), density-scaled so they never
+  overlap at full zoom and flight-path gaps survive.
+- **Notes**: in-app edit/delete (writes back to vault files, frontmatter
+  preserved), clickable `[[wikilinks]]`, links-to/linked-from rows, clickable
+  tags, "+ note" + double-click create. Drag-to-move is now a right-click
+  context menu (open / move / pin), not left-drag.
+- **PDFs**: in-panel pdf.js reader (lazy page render). Stepping stone — the
+  on-terrain unrolled scroll strip with margins, highlights, and LiquidText
+  excerpt threads remain the design goal.
+- **Images**: PNG/JPEG/etc render as framed cards and full-size in the panel;
+  placement is by filename (no pixel embedding).
+- **Capture**: watched vault dir + drag-&-drop upload onto the globe.
+- **Navigation**: search→fly, ride-the-arcs, saved views (localStorage),
+  wheel-zoomable minimap with its own LOD, hamburger sidebar with a hierarchical
+  vault file tree.
+- **Drift**: gentle settle tick every 3 min (skipped past 4k items); editing a
+  note re-embeds + re-places it; cards glide rather than teleport.
+- **Wikipedia Phase 1**: ~9k level-4 Vital Articles imported as a `wiki/`
+  source (scripts/fetch_wikipedia_vital.py), topic tags driving continents.
 
-- Wikipedia phase 1 (2026-06-12): ~9k Vital Articles (level 4) imported as a
-  `wiki/` source via scripts/fetch_wikipedia_vital.py, with topic tags driving
-  continents. Scale prep: batched embedding outside the lock, normalised
-  settle forces, lazy card pool, binned terrain sampling. Phase 2 (100k+:
-  ANN index, tile streaming, backend hierarchy) is designed but not built.
+Not yet built / known gaps:
+- On-terrain PDF scroll strip + margin annotations + excerpt threads.
+- Canvas patches (explicit Freeform boards pinned to the terrain).
+- Quick-capture inbox/hotkey.
+- **Phase 2 scale (100k–7M, e.g. all of Wikipedia)**: needs an ANN index
+  (sqlite-vec brute-force scan won't hold), viewport tile streaming (frontend
+  downloads the whole world per rev today), backend-side hierarchical
+  clustering, and chunk-level embeddings. Architecture sketched; not built.
 
 ## Post-v1 (explicitly deferred)
-- LLM region summaries (cluster prose, auto place-names beyond simple labels)
+- LLM region summaries (cluster prose, auto place-names beyond derived labels) —
+  the real fix for naming quality once tags run out.
 - Query → librarian: conversational LLM that flies the camera to clusters and
   answers from the world (read/navigate first; world-modifying librarian later)
 - Handwritten ink, OCR
